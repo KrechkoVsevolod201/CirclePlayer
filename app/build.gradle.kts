@@ -54,6 +54,7 @@ dependencies {
 
     // Для snapshotFlow
     implementation("androidx.compose.runtime:runtime-livedata:1.6.8")
+    implementation("androidx.compose.material:material-icons-extended:1.6.8")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

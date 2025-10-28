@@ -1,6 +1,7 @@
 // файл: app/src/main/java/com/example/circleplayer/PlayerComposables.kt
 package com.example.circleplayer
 
+import android.content.Context
 import android.net.Uri
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -31,6 +32,13 @@ import kotlinx.coroutines.flow.collect
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.ui.platform.LocalContext
 
 @Composable
 fun MusicPlayerApp(exoPlayer: ExoPlayer) {
@@ -83,12 +91,18 @@ fun iPodView(
     onPlay: () -> Unit,
     onMore: () -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .border(2.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp)) // 👈 граница
+            .padding(8.dp)
+    ) {
+        // Верх: список треков + счётчик
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(8.dp)
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -102,13 +116,25 @@ fun iPodView(
                     )
                 }
             }
+
+            // Счётчик треков в правом верхнем углу
+            Text(
+                text = "${selectedIndex + 1} / ${tracks.size}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .background(Color.White.copy(alpha = 0.7f), CircleShape)
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            )
         }
 
+        // Низ: колесо и кнопки
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(16.dp),
+                .padding(top = 16.dp),
             contentAlignment = Alignment.Center
         ) {
             ClickWheel(
@@ -157,9 +183,33 @@ fun ClickWheel(
     onScroll: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var accumulatedDelta by remember { mutableStateOf(0f) }
     val rotation = remember { Animatable(0f) }
-    val coroutineScope = rememberCoroutineScope() // 👈 ключевая строка
+    val coroutineScope = rememberCoroutineScope()
+
+    // Функция вибрации
+    val vibrate = remember {
+        @androidx.annotation.RequiresPermission(android.Manifest.permission.VIBRATE) {
+            try {
+                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                    vibratorManager.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(20, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(20)
+                }
+            } catch (e: Exception) {
+                // Игнорируем, если нет вибрации
+            }
+        }
+    }
 
     LaunchedEffect(isSeekMode) {
         rotation.snapTo(0f)
@@ -179,12 +229,12 @@ fun ClickWheel(
                         while (accumulatedDelta.absoluteValue >= threshold) {
                             val direction = if (accumulatedDelta > 0) 1f else -1f
                             onScroll(direction)
+                            vibrate() // 👈 виброотклик при каждом шаге
                             accumulatedDelta -= direction * threshold
                         }
 
                         val targetRotation = -accumulatedDelta * 2f
                         if (rotation.targetValue != targetRotation) {
-                            // Запускаем анимацию асинхронно
                             coroutineScope.launch {
                                 rotation.animateTo(
                                     targetRotation,
@@ -259,43 +309,91 @@ fun FullScreenPlayer(
     onBack: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            track?.let {
-                Text(it.title, style = MaterialTheme.typography.headlineMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(it.artist, style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(48.dp))
-                Button(onClick = onPlayPause) {
-                    Text(if (isPlaying) "Pause" else "Play")
-                }
-            }
-        }
-
+        // Кнопка назад
         IconButton(
             onClick = onBack,
-            modifier = Modifier.align(Alignment.TopStart)
+            modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
         ) {
             Icon(Icons.Default.ArrowBack, "Back")
         }
 
+        // Таймлайн вверху
+        track?.let {
+            val currentPosition by remember { derivedStateOf { exoPlayer.currentPosition } }
+            val duration by remember { derivedStateOf { exoPlayer.duration } }
+
+            val currentTime = if (duration > 0) formatTime(currentPosition) else "--:--"
+            val totalTime = if (duration > 0) formatTime(duration) else "--:--"
+
+            Text(
+                text = "$currentTime / $totalTime",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 16.dp)
+            )
+        }
+
+        // Основной контент по центру
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 32.dp)
+        ) {
+            track?.let {
+                Text(it.title, style = MaterialTheme.typography.headlineMedium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(it.artist, style = MaterialTheme.typography.titleMedium)
+            }
+        }
+
+        // Колесо внизу
         ClickWheel(
             isSeekMode = true,
             onScroll = { direction ->
                 if (exoPlayer.duration <= 0) return@ClickWheel
-                val currentPosition = exoPlayer.currentPosition
                 val stepMs = 5000L
-                val newPosition = (currentPosition + direction * stepMs).toLong().coerceIn(0L, exoPlayer.duration)
+                val newPosition = (exoPlayer.currentPosition + direction * stepMs).toLong()
+                    .coerceIn(0L, exoPlayer.duration)
                 exoPlayer.seekTo(newPosition)
             },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp)
         )
+
+        // Кнопка Play в центре колеса (поверх всего)
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 32.dp)
+                .size(240.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .background(Color.Gray, CircleShape)
+                    .clickable { onPlayPause() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+        }
     }
+}
+
+// Вспомогательная функция форматирования времени
+private fun formatTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).toInt()
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format("%02d:%02d", minutes, seconds)
 }
