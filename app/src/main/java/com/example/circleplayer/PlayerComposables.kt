@@ -1,7 +1,5 @@
-// файл: app/src/main/java/com/example/circleplayer/PlayerComposables.kt
 package com.example.circleplayer
 
-import android.content.Context
 import android.net.Uri
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -10,7 +8,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,33 +28,49 @@ import androidx.compose.ui.platform.LocalContext
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.absoluteValue
-import kotlinx.coroutines.flow.collect
-import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.content.Context
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.ui.platform.LocalContext
+
+
+
+// =============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===============
+
+private fun formatTime(ms: Long): String {
+    if (ms < 0) return "--:--"
+    val totalSeconds = (ms / 1000).toInt()
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format("%02d:%02d", minutes, seconds)
+}
+
+// =============== ОСНОВНОЙ КОМПОЗЕБЛ ===============
 
 @Composable
-fun MusicPlayerApp(exoPlayer: ExoPlayer) {
+fun MusicPlayerApp(
+    exoPlayer: ExoPlayer,
+    initialFolderPath: String? = null,
+    onFolderSelect: () -> Unit
+) {
     val context = LocalContext.current
 
     var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
     var selectedIndex by remember { mutableIntStateOf(0) }
     var isPlaying by remember { mutableStateOf(false) }
     var isFullScreen by remember { mutableStateOf(false) }
+    var folderPath by remember { mutableStateOf(initialFolderPath) }
 
-    LaunchedEffect(Unit) {
-        tracks = MusicRepository.getAudioTracks(context)
+    LaunchedEffect(folderPath) {
+        tracks = MusicRepository.getAudioTracks(context, folderPath)
+        if (tracks.isNotEmpty() && selectedIndex >= tracks.size) {
+            selectedIndex = 0
+        }
     }
-
-    // Следим за состоянием плеера
-
 
     if (isFullScreen) {
         FullScreenPlayer(
@@ -62,7 +78,8 @@ fun MusicPlayerApp(exoPlayer: ExoPlayer) {
             exoPlayer = exoPlayer,
             isPlaying = isPlaying,
             onPlayPause = {
-                exoPlayer.playWhenReady = !exoPlayer.playWhenReady
+                isPlaying = !isPlaying
+                exoPlayer.playWhenReady = isPlaying
             },
             onBack = { isFullScreen = false }
         )
@@ -73,15 +90,23 @@ fun MusicPlayerApp(exoPlayer: ExoPlayer) {
             onTrackSelected = { selectedIndex = it },
             onPlay = {
                 val track = tracks.getOrNull(selectedIndex) ?: return@iPodView
-                val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
-                exoPlayer.setMediaItem(mediaItem)
-                exoPlayer.prepare()
-                exoPlayer.play()
+                try {
+                    val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
+                    exoPlayer.setMediaItem(mediaItem)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                    isPlaying = true
+                } catch (e: Exception) {
+                    e.printStackTrace() // смотри в Logcat!
+                }
             },
-            onMore = { isFullScreen = true }
+            onMore = { isFullScreen = true },
+            onFolderSelect = onFolderSelect
         )
     }
 }
+
+// =============== iPodView ===============
 
 @Composable
 fun iPodView(
@@ -89,13 +114,14 @@ fun iPodView(
     selectedIndex: Int,
     onTrackSelected: (Int) -> Unit,
     onPlay: () -> Unit,
-    onMore: () -> Unit
+    onMore: () -> Unit,
+    onFolderSelect: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
-            .border(2.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp)) // 👈 граница
+            .border(2.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
             .padding(8.dp)
     ) {
         // Верх: список треков + счётчик
@@ -117,7 +143,7 @@ fun iPodView(
                 }
             }
 
-            // Счётчик треков в правом верхнем углу
+            // Счётчик треков — в правом верхнем углу
             Text(
                 text = "${selectedIndex + 1} / ${tracks.size}",
                 style = MaterialTheme.typography.bodyMedium,
@@ -127,9 +153,19 @@ fun iPodView(
                     .background(Color.White.copy(alpha = 0.7f), CircleShape)
                     .padding(horizontal = 8.dp, vertical = 2.dp)
             )
+
+            // Кнопка выбора папки — чуть ниже счётчика, всё ещё в правом верхнем углу
+            IconButton(
+                onClick = onFolderSelect,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(top = 24.dp) // отступ вниз от верхнего края
+            ) {
+                Icon(Icons.Default.Folder, "Select Folder", tint = MaterialTheme.colorScheme.primary)
+            }
         }
 
-        // Низ: колесо и кнопки
+        // Низ: колесо + кнопки (включая Folder)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -166,16 +202,19 @@ fun iPodView(
                     .padding(top = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                IconButton(onClick = { /* Назад не нужен */ }) {
+                IconButton(onClick = { /* Back */ }) {
                     Icon(Icons.Default.ArrowBack, "Back", tint = Color.Gray)
                 }
                 IconButton(onClick = onMore) {
                     Icon(Icons.Default.MoreVert, "More", tint = Color.Gray)
                 }
             }
+
         }
     }
 }
+
+// =============== ClickWheel ===============
 
 @Composable
 fun ClickWheel(
@@ -188,13 +227,12 @@ fun ClickWheel(
     val rotation = remember { Animatable(0f) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Функция вибрации
     val vibrate = remember {
-        @androidx.annotation.RequiresPermission(android.Manifest.permission.VIBRATE) {
+        {
             try {
                 val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                    vibratorManager.defaultVibrator
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                    vm.defaultVibrator
                 } else {
                     @Suppress("DEPRECATION")
                     context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
@@ -206,7 +244,7 @@ fun ClickWheel(
                     vibrator.vibrate(20)
                 }
             } catch (e: Exception) {
-                // Игнорируем, если нет вибрации
+                // ignore
             }
         }
     }
@@ -222,33 +260,35 @@ fun ClickWheel(
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDrag = { change, dragAmount ->
-                        val deltaDp = dragAmount.y
+                        // Инвертируем: вверх = +1
+                        val deltaDp = -dragAmount.y
                         accumulatedDelta += deltaDp
 
                         val threshold = 30f
-                        while (accumulatedDelta.absoluteValue >= threshold) {
-                            val direction = if (accumulatedDelta > 0) 1f else -1f
-                            onScroll(direction)
-                            vibrate() // 👈 виброотклик при каждом шаге
-                            accumulatedDelta -= direction * threshold
+                        while (accumulatedDelta >= threshold) {
+                            onScroll(1f)
+                            vibrate()
+                            accumulatedDelta -= threshold
+                        }
+                        while (accumulatedDelta <= -threshold) {
+                            onScroll(-1f)
+                            vibrate()
+                            accumulatedDelta += threshold
                         }
 
-                        val targetRotation = -accumulatedDelta * 2f
+                        val targetRotation = accumulatedDelta * 2f
                         if (rotation.targetValue != targetRotation) {
                             coroutineScope.launch {
                                 rotation.animateTo(
                                     targetRotation,
-                                    animationSpec = tween(durationMillis = 100, easing = LinearEasing)
+                                    animationSpec = tween(80, easing = LinearEasing)
                                 )
                             }
                         }
                     },
                     onDragEnd = {
                         coroutineScope.launch {
-                            rotation.animateTo(
-                                0f,
-                                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy)
-                            )
+                            rotation.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
                         }
                         accumulatedDelta = 0f
                     }
@@ -280,6 +320,8 @@ fun ClickWheel(
 
 private fun Float.toRadians() = this * (kotlin.math.PI.toFloat() / 180f)
 
+// =============== TrackRow ===============
+
 @Composable
 fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
     Row(
@@ -300,6 +342,8 @@ fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
     }
 }
 
+// =============== FullScreenPlayer ===============
+
 @Composable
 fun FullScreenPlayer(
     track: AudioTrack?,
@@ -309,7 +353,6 @@ fun FullScreenPlayer(
     onBack: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        // Кнопка назад
         IconButton(
             onClick = onBack,
             modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
@@ -317,39 +360,35 @@ fun FullScreenPlayer(
             Icon(Icons.Default.ArrowBack, "Back")
         }
 
-        // Таймлайн вверху
         track?.let {
-            val currentPosition by remember { derivedStateOf { exoPlayer.currentPosition } }
-            val duration by remember { derivedStateOf { exoPlayer.duration } }
+            val currentTime = formatTime(exoPlayer.currentPosition)
+            val totalTime = if (exoPlayer.duration > 0) formatTime(exoPlayer.duration) else "--:--"
 
-            val currentTime = if (duration > 0) formatTime(currentPosition) else "--:--"
-            val totalTime = if (duration > 0) formatTime(duration) else "--:--"
-
-            Text(
-                text = "$currentTime / $totalTime",
-                style = MaterialTheme.typography.titleMedium,
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 16.dp)
-            )
-        }
-
-        // Основной контент по центру
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 32.dp)
-        ) {
-            track?.let {
+                    .fillMaxWidth()
+                    .padding(top = 64.dp)
+            ) {
                 Text(it.title, style = MaterialTheme.typography.headlineMedium)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(it.artist, style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("$currentTime / $totalTime", style = MaterialTheme.typography.bodyMedium)
+
+                if (exoPlayer.duration > 0) {
+                    LinearProgressIndicator(
+                        progress = (exoPlayer.currentPosition.toFloat() / exoPlayer.duration.toFloat()).coerceIn(0f, 1f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 48.dp)
+                            .padding(top = 8.dp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
 
-        // Колесо внизу
         ClickWheel(
             isSeekMode = true,
             onScroll = { direction ->
@@ -364,7 +403,6 @@ fun FullScreenPlayer(
                 .padding(bottom = 32.dp)
         )
 
-        // Кнопка Play в центре колеса (поверх всего)
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -380,7 +418,7 @@ fun FullScreenPlayer(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = if (isPlaying) "Pause" else "Play",
                     tint = Color.White,
                     modifier = Modifier.size(32.dp)
@@ -388,12 +426,4 @@ fun FullScreenPlayer(
             }
         }
     }
-}
-
-// Вспомогательная функция форматирования времени
-private fun formatTime(ms: Long): String {
-    val totalSeconds = (ms / 1000).toInt()
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return String.format("%02d:%02d", minutes, seconds)
 }

@@ -3,6 +3,12 @@
     xmlns:tools="http://schemas.android.com/tools" >
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- AndroidManifest.xml -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Для Android 12 и ниже (опционально, если поддерживаешь) -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
