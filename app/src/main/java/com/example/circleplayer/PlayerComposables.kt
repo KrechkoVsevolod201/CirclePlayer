@@ -36,7 +36,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.content.Context
 import androidx.compose.foundation.shape.RoundedCornerShape
-
+import kotlinx.coroutines.delay
 
 
 // =============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===============
@@ -125,10 +125,15 @@ fun iPodView(
             .padding(8.dp)
     ) {
         // Верх: список треков + счётчик
+// Внутри iPodView, в Box с weight(1f):
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .background(Color(0xFFE8F0E8), RoundedCornerShape(8.dp)) // фон "экрана"
+                .padding(8.dp)
+                .border(1.dp, Color(0xFFA8B5A0), RoundedCornerShape(8.dp)) // внутренняя рамка
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -143,25 +148,23 @@ fun iPodView(
                 }
             }
 
-            // Счётчик треков — в правом верхнем углу
+            // Счётчик треков
             Text(
                 text = "${selectedIndex + 1} / ${tracks.size}",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = Color(0xFF556B55),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .background(Color.White.copy(alpha = 0.7f), CircleShape)
+                    .background(Color.White.copy(alpha = 0.8f), CircleShape)
                     .padding(horizontal = 8.dp, vertical = 2.dp)
             )
 
-            // Кнопка выбора папки — чуть ниже счётчика, всё ещё в правом верхнем углу
+            // Кнопка папки
             IconButton(
                 onClick = onFolderSelect,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(top = 24.dp) // отступ вниз от верхнего края
+                modifier = Modifier.align(Alignment.TopStart)
             ) {
-                Icon(Icons.Default.Folder, "Select Folder", tint = MaterialTheme.colorScheme.primary)
+                Icon(Icons.Default.Folder, "Select Folder", tint = Color(0xFF556B55))
             }
         }
 
@@ -352,17 +355,28 @@ fun FullScreenPlayer(
     onPlayPause: () -> Unit,
     onBack: () -> Unit
 ) {
+    // Обновляем позицию каждые 100 мс для плавного прогресса
+    var currentPosition by remember { mutableStateOf(exoPlayer.currentPosition) }
+
+    LaunchedEffect(isPlaying) {
+        if (!isPlaying) return@LaunchedEffect
+        while (true) {
+            currentPosition = exoPlayer.currentPosition
+            delay(100)
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         IconButton(
             onClick = onBack,
             modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
         ) {
-            Icon(Icons.Default.ArrowBack, "Back")
+            Icon(Icons.Default.ArrowBack, "Back", tint = Color(0xFF556B55))
         }
 
         track?.let {
-            val currentTime = formatTime(exoPlayer.currentPosition)
             val totalTime = if (exoPlayer.duration > 0) formatTime(exoPlayer.duration) else "--:--"
+            val currentTime = formatTime(currentPosition)
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -370,20 +384,20 @@ fun FullScreenPlayer(
                     .fillMaxWidth()
                     .padding(top = 64.dp)
             ) {
-                Text(it.title, style = MaterialTheme.typography.headlineMedium)
+                Text(it.title, style = MaterialTheme.typography.headlineMedium, color = Color(0xFF333333))
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(it.artist, style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text(it.artist, style = MaterialTheme.typography.titleMedium, color = Color(0xFF555555))
+                Spacer(modifier = Modifier.height(12.dp))
                 Text("$currentTime / $totalTime", style = MaterialTheme.typography.bodyMedium)
 
                 if (exoPlayer.duration > 0) {
                     LinearProgressIndicator(
-                        progress = (exoPlayer.currentPosition.toFloat() / exoPlayer.duration.toFloat()).coerceIn(0f, 1f),
+                        progress = (currentPosition.toFloat() / exoPlayer.duration.toFloat()).coerceIn(0f, 1f),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 48.dp)
                             .padding(top = 8.dp),
-                        color = MaterialTheme.colorScheme.primary
+                        color = Color(0xFF556B55)
                     )
                 }
             }
@@ -397,6 +411,7 @@ fun FullScreenPlayer(
                 val newPosition = (exoPlayer.currentPosition + direction * stepMs).toLong()
                     .coerceIn(0L, exoPlayer.duration)
                 exoPlayer.seekTo(newPosition)
+                currentPosition = newPosition // синхронизируем
             },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -413,7 +428,7 @@ fun FullScreenPlayer(
             Box(
                 modifier = Modifier
                     .size(64.dp)
-                    .background(Color.Gray, CircleShape)
+                    .background(Color(0xFF556B55), CircleShape)
                     .clickable { onPlayPause() },
                 contentAlignment = Alignment.Center
             ) {
