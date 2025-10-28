@@ -125,8 +125,6 @@ fun iPodView(
             .padding(8.dp)
     ) {
         // Верх: список треков + счётчик
-// Внутри iPodView, в Box с weight(1f):
-
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -176,9 +174,18 @@ fun iPodView(
                 .padding(top = 16.dp),
             contentAlignment = Alignment.Center
         ) {
+            // Внутри Box с колесом в iPodView:
+
+            var lastScrollTime by remember { mutableStateOf(0L) }
+            val minScrollInterval = 200L // минимум 200 мс между сменами трека
+
             ClickWheel(
                 isSeekMode = false,
                 onScroll = { direction ->
+                    val now = System.currentTimeMillis()
+                    if (now - lastScrollTime < minScrollInterval) return@ClickWheel
+                    lastScrollTime = now
+
                     val newIndex = (selectedIndex + direction.toInt()).coerceIn(0, tracks.size - 1)
                     onTrackSelected(newIndex)
                 }
