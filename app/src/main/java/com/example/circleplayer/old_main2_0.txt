@@ -1,0 +1,306 @@
+package com.example.circleplayer
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.clip
+import androidx.core.content.ContextCompat
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.compose.ui.platform.LocalContext
+import kotlin.math.cos
+import kotlin.math.sin
+
+class MainActivity : ComponentActivity() {
+
+    private lateinit var exoPlayer: ExoPlayer
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        exoPlayer = ExoPlayer.Builder(this).build()
+        requestPermission()
+
+        setContent {
+            MusicPlayerApp(exoPlayer = exoPlayer)
+        }
+    }
+
+    private fun requestPermission() {
+        val permission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+
+        if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                if (!granted) {
+                    // Можно показать объяснение
+                }
+            }.launch(permission)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        exoPlayer.release()
+    }
+}
+
+@Composable
+fun MusicPlayerApp(exoPlayer: ExoPlayer) {
+    val context = LocalContext.current
+
+    var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
+    var selectedIndex by remember { mutableIntStateOf(0) }
+    var isPlaying by remember { mutableStateOf(false) }
+    var isFullScreen by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        tracks = MusicRepository.getAudioTracks(context)
+    }
+
+    if (isFullScreen) {
+        FullScreenPlayer(
+            track = tracks.getOrNull(selectedIndex),
+            exoPlayer = exoPlayer,
+            isPlaying = isPlaying,
+            onPlayPause = {
+                if (isPlaying) {
+                    exoPlayer.pause()
+                } else {
+                    exoPlayer.play()
+                }
+                isPlaying = !isPlaying
+            },
+            onBack = { isFullScreen = false }
+        )
+    } else {
+        iPodView(
+            tracks = tracks,
+            selectedIndex = selectedIndex,
+            onTrackSelected = { selectedIndex = it },
+            onPlay = track@{
+                val track = tracks.getOrNull(selectedIndex) ?: return@track
+                val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
+                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.prepare()
+                exoPlayer.play()
+                isPlaying = true
+            },
+            onMore = { isFullScreen = true }
+        )
+    }
+}
+
+@Composable
+fun iPodView(
+    tracks: List<AudioTrack>,
+    selectedIndex: Int,
+    onTrackSelected: (Int) -> Unit,
+    onPlay: () -> Unit,
+    onMore: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Верх: список треков
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(8.dp)
+        ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(tracks.size) { index ->
+                    TrackRow(
+                        track = tracks[index],
+                        isSelected = index == selectedIndex,
+                        onClick = { onTrackSelected(index) }
+                    )
+                }
+            }
+        }
+
+        // Низ: клик-колесо + кнопки
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            ClickWheel(
+                onScrollUp = {
+                    if (selectedIndex > 0) onTrackSelected(selectedIndex - 1)
+                },
+                onScrollDown = {
+                    if (selectedIndex < tracks.size - 1) onTrackSelected(selectedIndex + 1)
+                }
+            )
+
+            // Центральная кнопка Play
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .background(Color.Gray, CircleShape)
+                    .clickable { onPlay() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "Play",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            // Кнопки Back и More
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(onClick = { /* Back не нужна на этом экране */ }) {
+                    Icon(Icons.Default.ArrowBack, "Back", tint = Color.Gray)
+                }
+                IconButton(onClick = onMore) {
+                    Icon(Icons.Default.MoreVert, "More", tint = Color.Gray)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ClickWheel(
+    onScrollUp: () -> Unit,
+    onScrollDown: () -> Unit
+) {
+    var lastY by remember { mutableStateOf(0f) }
+
+    Box(
+        modifier = Modifier
+            .size(240.dp)
+            .background(Color(0xFFE0E0E0), shape = CircleShape)
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { lastY = it.y }, // ✅ фиксируем стартовую позицию
+                    onDrag = { change, _ ->
+                        val currentY = change.position.y
+                        val deltaY = currentY - lastY
+                        if (deltaY < -5) { // ↓ уменьшили порог
+                            onScrollUp()
+                            lastY = currentY
+                        } else if (deltaY > 5) {
+                            onScrollDown()
+                            lastY = currentY
+                        }
+                    },
+                    onDragEnd = { lastY = 0f }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val radius = size.minDimension / 2f - 20f
+            repeat(12) { i ->
+                val angle = (i * 30f - 90f).toRadians()
+                drawLine(
+                    color = Color.Gray,
+                    start = Offset(
+                        x = size.width / 2f + cos(angle) * radius,
+                        y = size.height / 2f + sin(angle) * radius
+                    ),
+                    end = Offset(
+                        x = size.width / 2f + cos(angle) * (radius + 15f),
+                        y = size.height / 2f + sin(angle) * (radius + 15f)
+                    ),
+                    strokeWidth = 4f
+                )
+            }
+        }
+    }
+}
+
+private fun Float.toRadians() = this * (kotlin.math.PI.toFloat() / 180f)
+
+@Composable
+fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (isSelected) Color.LightGray else Color.Transparent)
+            .clickable { onClick() }
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                text = track.title,
+                fontWeight = if (isSelected) androidx.compose.ui.text.font.FontWeight.Bold else androidx.compose.ui.text.font.FontWeight.Normal
+            )
+            Text(track.artist, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+fun FullScreenPlayer(
+    track: AudioTrack?,
+    exoPlayer: ExoPlayer,
+    isPlaying: Boolean,
+    onPlayPause: () -> Unit,
+    onBack: () -> Unit
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            track?.let {
+                Text(it.title, style = MaterialTheme.typography.headlineMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(it.artist, style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(48.dp))
+                Button(onClick = onPlayPause) {
+                    Text(if (isPlaying) "Pause" else "Play")
+                }
+            }
+        }
+
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.align(Alignment.TopStart)
+        ) {
+            Icon(Icons.Default.ArrowBack, "Back")
+        }
+    }
+}
