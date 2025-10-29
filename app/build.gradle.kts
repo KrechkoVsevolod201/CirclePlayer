@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.example.circleplayer"
-    compileSdk = 34 // или 35, но 36 ещё не выпущен официально (на октябрь 2025)
+    compileSdk = 35// или 35, но 36 ещё не выпущен официально (на октябрь 2025)
 
     defaultConfig {
         applicationId = "com.example.circleplayer"
-        minSdk = 24
-        targetSdk = 36
+        minSdk = 25
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -54,7 +54,8 @@ dependencies {
 
     // Для snapshotFlow
     implementation("androidx.compose.runtime:runtime-livedata:1.6.8")
-    implementation("androidx.compose.material:material-icons-extended:1.6.8")
+    implementation("androidx.compose.material:material-icons-extended:1.7.4")
+    implementation(libs.androidx.compose.material.core)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

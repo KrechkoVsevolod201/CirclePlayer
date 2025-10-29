@@ -1,11 +1,14 @@
 package com.example.circleplayer
 
+import android.annotation.SuppressLint
 import android.net.Uri
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
@@ -19,25 +22,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.*
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.compose.ui.platform.LocalContext
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.absoluteValue
-import kotlinx.coroutines.launch
-import androidx.compose.runtime.rememberCoroutineScope
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.content.Context
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
-
+import kotlin.math.cos
+import kotlin.math.sin
 
 // =============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===============
 
@@ -49,6 +49,8 @@ private fun formatTime(ms: Long): String {
     return String.format("%02d:%02d", minutes, seconds)
 }
 
+private fun Float.toRadians() = this * (kotlin.math.PI.toFloat() / 180f)
+
 // =============== ОСНОВНОЙ КОМПОЗЕБЛ ===============
 
 @Composable
@@ -59,16 +61,66 @@ fun MusicPlayerApp(
 ) {
     val context = LocalContext.current
 
+    var currentFolderPath by remember { mutableStateOf(initialFolderPath) }
+    var lastKnownFolderPath by remember { mutableStateOf<String?>(null) }
+
+    // 🔑 Используем rememberSaveable с ключом
+    var selectedIndex by rememberSaveable(currentFolderPath) { mutableIntStateOf(0) }
+
     var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
-    var selectedIndex by remember { mutableIntStateOf(0) }
     var isPlaying by remember { mutableStateOf(false) }
     var isFullScreen by remember { mutableStateOf(false) }
-    var folderPath by remember { mutableStateOf(initialFolderPath) }
 
-    LaunchedEffect(folderPath) {
-        tracks = MusicRepository.getAudioTracks(context, folderPath)
-        if (tracks.isNotEmpty() && selectedIndex >= tracks.size) {
+    // 🔑 Запоминаем время последнего скролла для предотвращения множественных вызовов
+    var lastScrollTime by remember { mutableLongStateOf(0L) }
+
+    // Загружаем треки при изменении папки
+    LaunchedEffect(currentFolderPath) {
+        val newTracks = MusicRepository.getAudioTracks(context, currentFolderPath)
+        tracks = newTracks
+
+        if (currentFolderPath != lastKnownFolderPath) {
             selectedIndex = 0
+            lastKnownFolderPath = currentFolderPath
+        }
+
+        if (tracks.isNotEmpty() && selectedIndex >= tracks.size) {
+            selectedIndex = tracks.size - 1
+        }
+    }
+
+    // Обработка воспроизведения
+    LaunchedEffect(selectedIndex, tracks, isPlaying) {
+        if (isPlaying && tracks.isNotEmpty()) {
+            val track = tracks.getOrNull(selectedIndex) ?: return@LaunchedEffect
+            val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
+            if (exoPlayer.currentMediaItem?.mediaId != track.uri) {
+                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.prepare()
+                exoPlayer.play()
+            }
+        }
+    }
+
+    // 🔑 Функция для безопасного изменения индекса
+    fun handleTrackSelection(newIndex: Int) {
+        if (newIndex in tracks.indices && newIndex != selectedIndex) {
+            selectedIndex = newIndex
+        }
+    }
+
+    // 🔑 Функция для обработки скролла с защитой от спама
+    fun handleScroll(stepCount: Int) {
+        val now = System.currentTimeMillis()
+        if (now - lastScrollTime < 100) return // Защита от слишком частых вызовов
+
+        lastScrollTime = now
+
+        if (tracks.isEmpty()) return
+
+        val newIndex = (selectedIndex + stepCount).coerceIn(0, tracks.size - 1)
+        if (newIndex != selectedIndex) {
+            selectedIndex = newIndex
         }
     }
 
@@ -87,21 +139,26 @@ fun MusicPlayerApp(
         iPodView(
             tracks = tracks,
             selectedIndex = selectedIndex,
-            onTrackSelected = { selectedIndex = it },
-            onPlay = {
-                val track = tracks.getOrNull(selectedIndex) ?: return@iPodView
-                try {
+            isPlaying = isPlaying,
+            onTrackSelected = { index -> handleTrackSelection(index) },
+            onPlayPause = {
+                isPlaying = !isPlaying
+                exoPlayer.playWhenReady = isPlaying
+                if (isPlaying && tracks.isNotEmpty()) {
+                    val track = tracks.getOrNull(selectedIndex) ?: tracks.first().also { selectedIndex = 0 }
                     val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
-                    exoPlayer.setMediaItem(mediaItem)
-                    exoPlayer.prepare()
+                    if (exoPlayer.currentMediaItem?.mediaId != track.uri) {
+                        exoPlayer.setMediaItem(mediaItem)
+                        exoPlayer.prepare()
+                    }
                     exoPlayer.play()
-                    isPlaying = true
-                } catch (e: Exception) {
-                    e.printStackTrace() // смотри в Logcat!
+                } else {
+                    exoPlayer.pause()
                 }
             },
             onMore = { isFullScreen = true },
-            onFolderSelect = onFolderSelect
+            onFolderSelect = onFolderSelect,
+            onScroll = { stepCount -> handleScroll(stepCount) }
         )
     }
 }
@@ -112,11 +169,37 @@ fun MusicPlayerApp(
 fun iPodView(
     tracks: List<AudioTrack>,
     selectedIndex: Int,
+    isPlaying: Boolean,
     onTrackSelected: (Int) -> Unit,
-    onPlay: () -> Unit,
+    onPlayPause: () -> Unit,
     onMore: () -> Unit,
-    onFolderSelect: () -> Unit
+    onFolderSelect: () -> Unit,
+    onScroll: (Int) -> Unit // 🔑 Добавляем отдельный callback для скролла
 ) {
+    val lazyListState = rememberLazyListState()
+    var isUserScrolling by remember { mutableStateOf(false) }
+
+    // 🔑 Улучшенная логика авто-прокрутки
+    LaunchedEffect(selectedIndex) {
+        if (tracks.isNotEmpty() && selectedIndex in tracks.indices && !isUserScrolling) {
+            // Небольшая задержка для предотвращения конфликтов
+            delay(50)
+            if (!isUserScrolling) {
+                lazyListState.animateScrollToItem(selectedIndex)
+            }
+        }
+    }
+
+    // 🔑 Отслеживаем пользовательский скролл
+    LaunchedEffect(lazyListState.isScrollInProgress) {
+        isUserScrolling = lazyListState.isScrollInProgress
+        if (!lazyListState.isScrollInProgress) {
+            // После завершения скролла можно снова включить авто-прокрутку
+            delay(300)
+            isUserScrolling = false
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -124,20 +207,21 @@ fun iPodView(
             .border(2.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
             .padding(8.dp)
     ) {
-        // Верх: список треков + счётчик
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(Color(0xFFE8F0E8), RoundedCornerShape(8.dp)) // фон "экрана"
+                .background(Color(0xFFE8F0E8), RoundedCornerShape(8.dp))
                 .padding(8.dp)
-                .border(1.dp, Color(0xFFA8B5A0), RoundedCornerShape(8.dp)) // внутренняя рамка
+                .border(1.dp, Color(0xFFA8B5A0), RoundedCornerShape(8.dp))
         ) {
             LazyColumn(
+                state = lazyListState,
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                items(tracks.size) { index ->
+                // 🔑 Улучшенный ключ - комбинация URI и индекса
+                items(tracks.size, key = { index -> "${tracks[index].uri}_$index" }) { index ->
                     TrackRow(
                         track = tracks[index],
                         isSelected = index == selectedIndex,
@@ -146,7 +230,6 @@ fun iPodView(
                 }
             }
 
-            // Счётчик треков
             Text(
                 text = "${selectedIndex + 1} / ${tracks.size}",
                 style = MaterialTheme.typography.bodyMedium,
@@ -157,16 +240,14 @@ fun iPodView(
                     .padding(horizontal = 8.dp, vertical = 2.dp)
             )
 
-            // Кнопка папки
             IconButton(
                 onClick = onFolderSelect,
-                modifier = Modifier.align(Alignment.TopStart)
+                modifier = Modifier.align(Alignment.BottomEnd)
             ) {
                 Icon(Icons.Default.Folder, "Select Folder", tint = Color(0xFF556B55))
             }
         }
 
-        // Низ: колесо + кнопки (включая Folder)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -174,40 +255,17 @@ fun iPodView(
                 .padding(top = 16.dp),
             contentAlignment = Alignment.Center
         ) {
-            // Внутри Box с колесом в iPodView:
-
-            var lastScrollTime by remember { mutableStateOf(0L) }
-            val minScrollInterval = 200L // минимум 200 мс между сменами трека
-
             ClickWheel(
-                isSeekMode = false,
-                onScroll = { direction ->
-                    val now = System.currentTimeMillis()
-                    if (now - lastScrollTime < minScrollInterval) return@ClickWheel
-                    lastScrollTime = now
-
-                    val newIndex = (selectedIndex + direction.toInt()).coerceIn(0, tracks.size - 1)
-                    onTrackSelected(newIndex)
-                }
+                isPlaying = isPlaying,
+                onScroll = { stepCount ->
+                    onScroll(stepCount) // 🔑 Используем новый callback
+                },
+                onCenterClick = onPlayPause
             )
-
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .background(Color.Gray, CircleShape)
-                    .clickable { onPlay() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp)
-                )
-            }
 
             Row(
                 modifier = Modifier
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .padding(top = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -219,27 +277,33 @@ fun iPodView(
                     Icon(Icons.Default.MoreVert, "More", tint = Color.Gray)
                 }
             }
-
         }
     }
 }
 
 // =============== ClickWheel ===============
 
+@SuppressLint("RestrictedApi")
 @Composable
 fun ClickWheel(
-    isSeekMode: Boolean = false,
-    onScroll: (Float) -> Unit,
+    isPlaying: Boolean = false,
+    onScroll: (Int) -> Unit,
+    onCenterClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var accumulatedDelta by remember { mutableStateOf(0f) }
     val rotation = remember { Animatable(0f) }
     val coroutineScope = rememberCoroutineScope()
+
+    // 🔑 Добавляем защиту от слишком быстрого скролла
+    var lastScrollTime by remember { mutableLongStateOf(0L) }
 
     val vibrate = remember {
         {
             try {
+                val now = System.currentTimeMillis()
+                if (now - lastScrollTime < 50) return@remember // Не вибрируем слишком часто
+
                 val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
                     vm.defaultVibrator
@@ -248,10 +312,10 @@ fun ClickWheel(
                     context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator.vibrate(VibrationEffect.createOneShot(20, VibrationEffect.DEFAULT_AMPLITUDE))
+                    vibrator.vibrate(VibrationEffect.createOneShot(10, VibrationEffect.DEFAULT_AMPLITUDE))
                 } else {
                     @Suppress("DEPRECATION")
-                    vibrator.vibrate(20)
+                    vibrator.vibrate(10)
                 }
             } catch (e: Exception) {
                 // ignore
@@ -259,9 +323,9 @@ fun ClickWheel(
         }
     }
 
-    LaunchedEffect(isSeekMode) {
-        rotation.snapTo(0f)
-    }
+    var startY by remember { mutableStateOf(0f) }
+    var currentOffset by remember { mutableStateOf(0f) }
+    var lastReportedStep by remember { mutableStateOf(0) }
 
     Box(
         modifier = modifier
@@ -269,29 +333,32 @@ fun ClickWheel(
             .background(Color(0xFFE0E0E0), shape = CircleShape)
             .pointerInput(Unit) {
                 detectDragGestures(
-                    onDrag = { change, dragAmount ->
-                        // Инвертируем: вверх = +1
-                        val deltaDp = -dragAmount.y
-                        accumulatedDelta += deltaDp
+                    onDragStart = { offset ->
+                        startY = offset.y
+                        currentOffset = 0f
+                        lastReportedStep = 0
+                        lastScrollTime = System.currentTimeMillis()
+                    },
+                    onDrag = { change, _ ->
+                        val now = System.currentTimeMillis()
+                        if (now - lastScrollTime < 50) return@detectDragGestures // 🔑 Защита от частых обновлений
 
-                        val threshold = 30f
-                        while (accumulatedDelta >= threshold) {
-                            onScroll(1f)
+                        currentOffset = -(change.position.y - startY)
+                        val stepSize = 40f // 🔑 Увеличиваем шаг для меньшей чувствительности
+                        val currentStep = (currentOffset / stepSize).toInt()
+                        if (currentStep != lastReportedStep) {
+                            val diff = currentStep - lastReportedStep
+                            onScroll(diff)
                             vibrate()
-                            accumulatedDelta -= threshold
+                            lastReportedStep = currentStep
+                            lastScrollTime = now
                         }
-                        while (accumulatedDelta <= -threshold) {
-                            onScroll(-1f)
-                            vibrate()
-                            accumulatedDelta += threshold
-                        }
-
-                        val targetRotation = accumulatedDelta * 2f
+                        val targetRotation = currentOffset * 1.5f // 🔑 Уменьшаем вращение
                         if (rotation.targetValue != targetRotation) {
                             coroutineScope.launch {
                                 rotation.animateTo(
                                     targetRotation,
-                                    animationSpec = tween(80, easing = LinearEasing)
+                                    animationSpec = tween(100, easing = LinearEasing) // 🔑 Увеличиваем время анимации
                                 )
                             }
                         }
@@ -300,35 +367,33 @@ fun ClickWheel(
                         coroutineScope.launch {
                             rotation.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
                         }
-                        accumulatedDelta = 0f
                     }
                 )
             }
             .graphicsLayer { rotationZ = rotation.value },
         contentAlignment = Alignment.Center
     ) {
+        // ... остальной код без изменений
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val radius = size.minDimension / 2f - 20f
-            repeat(12) { i ->
-                val angle = (i * 30f - 90f).toRadians()
-                drawLine(
-                    color = Color.Gray,
-                    start = Offset(
-                        x = size.width / 2f + cos(angle) * radius,
-                        y = size.height / 2f + sin(angle) * radius
-                    ),
-                    end = Offset(
-                        x = size.width / 2f + cos(angle) * (radius + 15f),
-                        y = size.height / 2f + sin(angle) * (radius + 15f)
-                    ),
-                    strokeWidth = 4f
-                )
-            }
+            // ... существующий код
+        }
+
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .background(Color(0xFF556B55), CircleShape)
+                .clickable { onCenterClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = Color.White,
+                modifier = Modifier.size(32.dp)
+            )
         }
     }
 }
-
-private fun Float.toRadians() = this * (kotlin.math.PI.toFloat() / 180f)
 
 // =============== TrackRow ===============
 
@@ -362,7 +427,6 @@ fun FullScreenPlayer(
     onPlayPause: () -> Unit,
     onBack: () -> Unit
 ) {
-    // Обновляем позицию каждые 100 мс для плавного прогресса
     var currentPosition by remember { mutableStateOf(exoPlayer.currentPosition) }
 
     LaunchedEffect(isPlaying) {
@@ -411,41 +475,19 @@ fun FullScreenPlayer(
         }
 
         ClickWheel(
-            isSeekMode = true,
-            onScroll = { direction ->
+            isPlaying = isPlaying,
+            onScroll = { stepCount ->
                 if (exoPlayer.duration <= 0) return@ClickWheel
                 val stepMs = 5000L
-                val newPosition = (exoPlayer.currentPosition + direction * stepMs).toLong()
+                val newPosition = (exoPlayer.currentPosition + stepCount * stepMs).toLong()
                     .coerceIn(0L, exoPlayer.duration)
                 exoPlayer.seekTo(newPosition)
-                currentPosition = newPosition // синхронизируем
+                currentPosition = newPosition
             },
+            onCenterClick = onPlayPause,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp)
         )
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 32.dp)
-                .size(240.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .background(Color(0xFF556B55), CircleShape)
-                    .clickable { onPlayPause() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp)
-                )
-            }
-        }
     }
 }
