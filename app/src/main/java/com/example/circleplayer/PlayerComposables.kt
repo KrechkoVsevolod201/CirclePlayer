@@ -36,6 +36,7 @@ import android.content.Context
 import androidx.compose.runtime.saveable.rememberSaveable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -295,14 +296,14 @@ fun ClickWheel(
     val rotation = remember { Animatable(0f) }
     val coroutineScope = rememberCoroutineScope()
 
-    // 🔑 Добавляем защиту от слишком быстрого скролла
+    // Защита от слишком быстрого скролла
     var lastScrollTime by remember { mutableLongStateOf(0L) }
 
     val vibrate = remember {
         {
             try {
                 val now = System.currentTimeMillis()
-                if (now - lastScrollTime < 50) return@remember // Не вибрируем слишком часто
+                if (now - lastScrollTime < 50) return@remember
 
                 val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -311,7 +312,7 @@ fun ClickWheel(
                     @Suppress("DEPRECATION")
                     context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (Build.VERSION_CODES.O <= Build.VERSION.SDK_INT) {
                     vibrator.vibrate(VibrationEffect.createOneShot(10, VibrationEffect.DEFAULT_AMPLITUDE))
                 } else {
                     @Suppress("DEPRECATION")
@@ -323,8 +324,10 @@ fun ClickWheel(
         }
     }
 
-    var startY by remember { mutableStateOf(0f) }
-    var currentOffset by remember { mutableStateOf(0f) }
+    // Отслеживаем угловое положение
+    var startAngle by remember { mutableStateOf(0f) }
+    var lastAngle by remember { mutableStateOf(0f) }
+    var accumulatedRotation by remember { mutableStateOf(0f) }
     var lastReportedStep by remember { mutableStateOf(0) }
 
     Box(
@@ -332,33 +335,55 @@ fun ClickWheel(
             .size(240.dp)
             .background(Color(0xFFE0E0E0), shape = CircleShape)
             .pointerInput(Unit) {
+                val center = Offset((size.width / 2).toFloat(), (size.height / 2).toFloat())
+
                 detectDragGestures(
                     onDragStart = { offset ->
-                        startY = offset.y
-                        currentOffset = 0f
+                        // Вычисляем начальный угол относительно центра
+                        startAngle = calculateAngle(offset, center)
+                        lastAngle = startAngle
+                        accumulatedRotation = 0f
                         lastReportedStep = 0
                         lastScrollTime = System.currentTimeMillis()
                     },
                     onDrag = { change, _ ->
                         val now = System.currentTimeMillis()
-                        if (now - lastScrollTime < 50) return@detectDragGestures // 🔑 Защита от частых обновлений
+                        if (now - lastScrollTime < 50) return@detectDragGestures
 
-                        currentOffset = -(change.position.y - startY)
-                        val stepSize = 40f // 🔑 Увеличиваем шаг для меньшей чувствительности
-                        val currentStep = (currentOffset / stepSize).toInt()
+                        // Вычисляем текущий угол
+                        val currentAngle = calculateAngle(change.position, center)
+
+                        // Вычисляем изменение угла
+                        var deltaAngle = currentAngle - lastAngle
+
+                        // Обрабатываем переход через 0/360 градусов
+                        if (deltaAngle > 180f) deltaAngle -= 360f
+                        if (deltaAngle < -180f) deltaAngle += 360f
+
+                        accumulatedRotation += deltaAngle
+                        lastAngle = currentAngle
+
+                        // Определяем шаг (каждые 30 градусов = 1 шаг)
+                        val stepSize = 30f
+                        val currentStep = (accumulatedRotation / stepSize).toInt()
+
                         if (currentStep != lastReportedStep) {
                             val diff = currentStep - lastReportedStep
+                            // Положительное значение = по часовой стрелке (вперед)
+                            // Отрицательное значение = против часовой стрелки (назад)
                             onScroll(diff)
                             vibrate()
                             lastReportedStep = currentStep
                             lastScrollTime = now
                         }
-                        val targetRotation = currentOffset * 1.5f // 🔑 Уменьшаем вращение
+
+                        // Визуальное вращение колеса
+                        val targetRotation = accumulatedRotation * 1.5f
                         if (rotation.targetValue != targetRotation) {
                             coroutineScope.launch {
                                 rotation.animateTo(
                                     targetRotation,
-                                    animationSpec = tween(100, easing = LinearEasing) // 🔑 Увеличиваем время анимации
+                                    animationSpec = tween(100, easing = LinearEasing)
                                 )
                             }
                         }
@@ -373,9 +398,19 @@ fun ClickWheel(
             .graphicsLayer { rotationZ = rotation.value },
         contentAlignment = Alignment.Center
     ) {
-        // ... остальной код без изменений
         Canvas(modifier = Modifier.fillMaxSize()) {
-            // ... существующий код
+            // Рисуем метки на колесе для визуализации вращения
+            val radius = size.minDimension / 2
+            for (i in 0 until 12) {
+                val angle = Math.toRadians((i * 30).toDouble())
+                val x = center.x + (radius * 0.85f * cos(angle)).toFloat()
+                val y = center.y + (radius * 0.85f * sin(angle)).toFloat()
+                drawCircle(
+                    color = Color(0xFF888888),
+                    radius = 8f,
+                    center = Offset(x, y)
+                )
+            }
         }
 
         Box(
@@ -395,6 +430,12 @@ fun ClickWheel(
     }
 }
 
+// Вспомогательная функция для вычисления угла относительно центра
+private fun calculateAngle(point: Offset, center: Offset): Float {
+    val dx = point.x - center.x
+    val dy = point.y - center.y
+    return Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+}
 // =============== TrackRow ===============
 
 @Composable
