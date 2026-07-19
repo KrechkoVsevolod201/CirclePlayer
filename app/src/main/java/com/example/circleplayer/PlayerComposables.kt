@@ -13,10 +13,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.DisposableEffect
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -27,7 +31,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.core.*
 import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import com.example.circleplayer.audio.EffectsManager
+import com.example.circleplayer.audio.EffectsRenderersFactory
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -54,28 +61,41 @@ private fun Float.toRadians() = this * (kotlin.math.PI.toFloat() / 180f)
 
 // =============== ОСНОВНОЙ КОМПОЗЕБЛ ===============
 
+@UnstableApi
 @Composable
 fun MusicPlayerApp(
-    exoPlayer: ExoPlayer,
+    initialExoPlayer: ExoPlayer,
+    effectsManager: EffectsManager,
     initialFolderPath: String? = null,
     onFolderSelect: () -> Unit
 ) {
     val context = LocalContext.current
+    val appContext = context.applicationContext
 
     var currentFolderPath by remember { mutableStateOf(initialFolderPath) }
     var lastKnownFolderPath by remember { mutableStateOf<String?>(null) }
 
-    // 🔑 Используем rememberSaveable с ключом
-    var selectedIndex by rememberSaveable(currentFolderPath) { mutableIntStateOf(0) }
+    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
 
     var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
     var isPlaying by remember { mutableStateOf(false) }
     var isFullScreen by remember { mutableStateOf(false) }
+    var showEffectsMenu by remember { mutableStateOf(false) }
 
-    // 🔑 Запоминаем время последнего скролла для предотвращения множественных вызовов
+    var useEffects by remember { mutableStateOf(false) }
+    var previousUseEffects by remember { mutableStateOf(false) }
+    var currentPlayer by remember { mutableStateOf(initialExoPlayer) }
+    var playerGeneration by remember { mutableIntStateOf(0) }
+
     var lastScrollTime by remember { mutableLongStateOf(0L) }
 
-    // Загружаем треки при изменении папки
+    // Sync folder path from Activity when picker updates prefs-backed state
+    LaunchedEffect(initialFolderPath) {
+        if (initialFolderPath != currentFolderPath) {
+            currentFolderPath = initialFolderPath
+        }
+    }
+
     LaunchedEffect(currentFolderPath) {
         val newTracks = MusicRepository.getAudioTracks(context, currentFolderPath)
         tracks = newTracks
@@ -90,30 +110,92 @@ fun MusicPlayerApp(
         }
     }
 
-    // Обработка воспроизведения
-    LaunchedEffect(selectedIndex, tracks, isPlaying) {
-        if (isPlaying && tracks.isNotEmpty()) {
-            val track = tracks.getOrNull(selectedIndex) ?: return@LaunchedEffect
-            val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
-            if (exoPlayer.currentMediaItem?.mediaId != track.uri) {
-                exoPlayer.setMediaItem(mediaItem)
-                exoPlayer.prepare()
-                exoPlayer.play()
+    LaunchedEffect(useEffects) {
+        if (useEffects == previousUseEffects) return@LaunchedEffect
+        previousUseEffects = useEffects
+
+        val oldPlayer = currentPlayer
+        val wasPlaying = isPlaying || oldPlayer.isPlaying
+        val position = oldPlayer.currentPosition.coerceAtLeast(0L)
+        val trackUri = oldPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
+            ?: tracks.getOrNull(selectedIndex)?.uri
+
+        try {
+            oldPlayer.pause()
+        } catch (_: Exception) {
+        }
+
+        val newPlayer = try {
+            if (useEffects) {
+                val renderersFactory = EffectsRenderersFactory(
+                    appContext,
+                    effectsManager.getAudioProcessors()
+                )
+                ExoPlayer.Builder(appContext, renderersFactory).build()
+            } else {
+                ExoPlayer.Builder(appContext).build()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ExoPlayer.Builder(appContext).build()
+        }
+
+        currentPlayer = newPlayer
+        playerGeneration++
+
+        if (trackUri != null) {
+            try {
+                val mediaItem = MediaItem.fromUri(Uri.parse(trackUri))
+                newPlayer.setMediaItem(mediaItem)
+                newPlayer.prepare()
+                if (position > 0) {
+                    newPlayer.seekTo(position)
+                }
+                if (wasPlaying) {
+                    isPlaying = true
+                    newPlayer.playWhenReady = true
+                    newPlayer.play()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        if (oldPlayer !== initialExoPlayer) {
+            try {
+                oldPlayer.release()
+            } catch (_: Exception) {
             }
         }
     }
 
-    // 🔑 Функция для безопасного изменения индекса
+    LaunchedEffect(selectedIndex, tracks, isPlaying, playerGeneration) {
+        if (!isPlaying || tracks.isEmpty()) return@LaunchedEffect
+        val track = tracks.getOrNull(selectedIndex) ?: return@LaunchedEffect
+        val player = currentPlayer
+        try {
+            val currentUri = player.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (currentUri != track.uri) {
+                val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
+                player.setMediaItem(mediaItem)
+                player.prepare()
+            }
+            player.playWhenReady = true
+            player.play()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun handleTrackSelection(newIndex: Int) {
         if (newIndex in tracks.indices && newIndex != selectedIndex) {
             selectedIndex = newIndex
         }
     }
 
-    // 🔑 Функция для обработки скролла с защитой от спама
     fun handleScroll(stepCount: Int) {
         val now = System.currentTimeMillis()
-        if (now - lastScrollTime < 100) return // Защита от слишком частых вызовов
+        if (now - lastScrollTime < 100) return
 
         lastScrollTime = now
 
@@ -125,14 +207,52 @@ fun MusicPlayerApp(
         }
     }
 
-    if (isFullScreen) {
+    DisposableEffect(Unit) {
+        onDispose {
+            if (currentPlayer !== initialExoPlayer) {
+                try {
+                    currentPlayer.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    val backPressedDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+
+    DisposableEffect(backPressedDispatcher) {
+        val callback = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    showEffectsMenu -> showEffectsMenu = false
+                    isFullScreen -> isFullScreen = false
+                    else -> {
+                        isEnabled = false
+                        backPressedDispatcher?.onBackPressed()
+                    }
+                }
+            }
+        }
+        backPressedDispatcher?.addCallback(callback)
+        onDispose { callback.remove() }
+    }
+
+    if (showEffectsMenu) {
+        EffectsMenu(
+            effectsManager = effectsManager,
+            useEffects = useEffects,
+            onUseEffectsChange = { useEffects = it },
+            onBack = { showEffectsMenu = false }
+        )
+    } else if (isFullScreen) {
         FullScreenPlayer(
             track = tracks.getOrNull(selectedIndex),
-            exoPlayer = exoPlayer,
+            exoPlayer = currentPlayer,
             isPlaying = isPlaying,
             onPlayPause = {
                 isPlaying = !isPlaying
-                exoPlayer.playWhenReady = isPlaying
+                currentPlayer.playWhenReady = isPlaying
+                if (isPlaying) currentPlayer.play() else currentPlayer.pause()
             },
             onBack = { isFullScreen = false }
         )
@@ -144,20 +264,23 @@ fun MusicPlayerApp(
             onTrackSelected = { index -> handleTrackSelection(index) },
             onPlayPause = {
                 isPlaying = !isPlaying
-                exoPlayer.playWhenReady = isPlaying
+                currentPlayer.playWhenReady = isPlaying
                 if (isPlaying && tracks.isNotEmpty()) {
-                    val track = tracks.getOrNull(selectedIndex) ?: tracks.first().also { selectedIndex = 0 }
+                    val track = tracks.getOrNull(selectedIndex)
+                        ?: tracks.first().also { selectedIndex = 0 }
                     val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
-                    if (exoPlayer.currentMediaItem?.mediaId != track.uri) {
-                        exoPlayer.setMediaItem(mediaItem)
-                        exoPlayer.prepare()
+                    val currentUri = currentPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
+                    if (currentUri != track.uri) {
+                        currentPlayer.setMediaItem(mediaItem)
+                        currentPlayer.prepare()
                     }
-                    exoPlayer.play()
+                    currentPlayer.play()
                 } else {
-                    exoPlayer.pause()
+                    currentPlayer.pause()
                 }
             },
             onMore = { isFullScreen = true },
+            onEffectsClick = { showEffectsMenu = true },
             onFolderSelect = onFolderSelect,
             onScroll = { stepCount -> handleScroll(stepCount) }
         )
@@ -174,8 +297,9 @@ fun iPodView(
     onTrackSelected: (Int) -> Unit,
     onPlayPause: () -> Unit,
     onMore: () -> Unit,
+    onEffectsClick: () -> Unit,
     onFolderSelect: () -> Unit,
-    onScroll: (Int) -> Unit // 🔑 Добавляем отдельный callback для скролла
+    onScroll: (Int) -> Unit
 ) {
     val lazyListState = rememberLazyListState()
     var isUserScrolling by remember { mutableStateOf(false) }
@@ -240,13 +364,6 @@ fun iPodView(
                     .background(Color.White.copy(alpha = 0.8f), CircleShape)
                     .padding(horizontal = 8.dp, vertical = 2.dp)
             )
-
-            IconButton(
-                onClick = onFolderSelect,
-                modifier = Modifier.align(Alignment.BottomEnd)
-            ) {
-                Icon(Icons.Default.Folder, "Select Folder", tint = Color(0xFF556B55))
-            }
         }
 
         Box(
@@ -269,10 +386,16 @@ fun iPodView(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .padding(top = 16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 IconButton(onClick = { /* Back */ }) {
                     Icon(Icons.Default.ArrowBack, "Back", tint = Color.Gray)
+                }
+                IconButton(onClick = onEffectsClick) {
+                    Icon(Icons.Default.MusicNote, "Effects", tint = Color(0xFF556B55))
+                }
+                IconButton(onClick = onFolderSelect) {
+                    Icon(Icons.Default.Folder, "Select Folder", tint = Color(0xFF556B55))
                 }
                 IconButton(onClick = onMore) {
                     Icon(Icons.Default.MoreVert, "More", tint = Color.Gray)
@@ -479,13 +602,6 @@ fun FullScreenPlayer(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        IconButton(
-            onClick = onBack,
-            modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
-        ) {
-            Icon(Icons.Default.ArrowBack, "Back", tint = Color(0xFF556B55))
-        }
-
         track?.let {
             val totalTime = if (exoPlayer.duration > 0) formatTime(exoPlayer.duration) else "--:--"
             val currentTime = formatTime(currentPosition)
@@ -530,5 +646,304 @@ fun FullScreenPlayer(
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp)
         )
+
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(16.dp)
+        ) {
+            Icon(Icons.Default.ArrowBack, "Back", tint = Color(0xFF556B55))
+        }
+    }
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+fun EffectsMenu(
+    effectsManager: EffectsManager,
+    useEffects: Boolean,
+    onUseEffectsChange: (Boolean) -> Unit,
+    onBack: () -> Unit
+) {
+    var wowEnabled by remember { mutableStateOf(effectsManager.wowFlutter.enabled) }
+    var wowDepth by remember { mutableFloatStateOf(effectsManager.wowFlutter.depth) }
+    var wowRate by remember { mutableFloatStateOf(effectsManager.wowFlutter.rate) }
+    
+    var detonationEnabled by remember { mutableStateOf(effectsManager.volumeDetonation.enabled) }
+    var detonationAmount by remember { mutableFloatStateOf(effectsManager.volumeDetonation.amount) }
+    
+    var chorusEnabled by remember { mutableStateOf(effectsManager.chorus.enabled) }
+    var chorusDepth by remember { mutableFloatStateOf(effectsManager.chorus.depth) }
+    var chorusRate by remember { mutableFloatStateOf(effectsManager.chorus.rate) }
+    var chorusMix by remember { mutableFloatStateOf(effectsManager.chorus.mix) }
+    
+    var noiseEnabled by remember { mutableStateOf(effectsManager.vintageNoise.enabled) }
+    var noiseLevel by remember { mutableFloatStateOf(effectsManager.vintageNoise.noiseLevel) }
+    var crackleIntensity by remember { mutableFloatStateOf(effectsManager.vintageNoise.crackleIntensity) }
+    
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Эффекты плёнки",
+                style = MaterialTheme.typography.headlineMedium,
+                color = Color(0xFF333333),
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFD0E8D0))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Включить эффекты",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color(0xFF333333)
+                        )
+                        Text(
+                            text = "Переключает режим воспроизведения",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF556B55)
+                        )
+                    }
+                    Switch(
+                        checked = useEffects,
+                        onCheckedChange = onUseEffectsChange
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Wow & Flutter",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF333333)
+                    )
+                    Switch(
+                        checked = wowEnabled,
+                        onCheckedChange = { 
+                            wowEnabled = it
+                            effectsManager.wowFlutter.enabled = it
+                        }
+                    )
+                }
+                Text(
+                    text = "Неравномерность скорости воспроизведения",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF556B55)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Глубина: ${"%.2f".format(wowDepth)}", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = wowDepth,
+                    onValueChange = { 
+                        wowDepth = it
+                        effectsManager.wowFlutter.depth = it
+                    },
+                    valueRange = 0f..1f
+                )
+                Text("Частота: ${"%.2f".format(wowRate)} Гц", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = wowRate,
+                    onValueChange = { 
+                        wowRate = it
+                        effectsManager.wowFlutter.rate = it
+                    },
+                    valueRange = 0.1f..5f
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Volume Detonation",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF333333)
+                    )
+                    Switch(
+                        checked = detonationEnabled,
+                        onCheckedChange = { 
+                            detonationEnabled = it
+                            effectsManager.volumeDetonation.enabled = it
+                        }
+                    )
+                }
+                Text(
+                    text = "Перегрузка при высокой амплитуде",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF556B55)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Степень: ${"%.2f".format(detonationAmount)}", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = detonationAmount,
+                    onValueChange = { 
+                        detonationAmount = it
+                        effectsManager.volumeDetonation.amount = it
+                    },
+                    valueRange = 0f..1f
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Chorus",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF333333)
+                    )
+                    Switch(
+                        checked = chorusEnabled,
+                        onCheckedChange = { 
+                            chorusEnabled = it
+                            effectsManager.chorus.enabled = it
+                        }
+                    )
+                }
+                Text(
+                    text = "Эффект хора",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF556B55)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Глубина: ${"%.2f".format(chorusDepth)}", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = chorusDepth,
+                    onValueChange = { 
+                        chorusDepth = it
+                        effectsManager.chorus.depth = it
+                    },
+                    valueRange = 0f..1f
+                )
+                Text("Частота: ${"%.2f".format(chorusRate)} Гц", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = chorusRate,
+                    onValueChange = { 
+                        chorusRate = it
+                        effectsManager.chorus.rate = it
+                    },
+                    valueRange = 0.1f..5f
+                )
+                Text("Микс: ${"%.2f".format(chorusMix)}", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = chorusMix,
+                    onValueChange = { 
+                        chorusMix = it
+                        effectsManager.chorus.mix = it
+                    },
+                    valueRange = 0f..1f
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Vintage Noise",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF333333)
+                    )
+                    Switch(
+                        checked = noiseEnabled,
+                        onCheckedChange = { 
+                            noiseEnabled = it
+                            effectsManager.vintageNoise.enabled = it
+                        }
+                    )
+                }
+                Text(
+                    text = "Шум и хруст винила",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF556B55)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Уровень шума: ${"%.2f".format(noiseLevel)}", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = noiseLevel,
+                    onValueChange = { 
+                        noiseLevel = it
+                        effectsManager.vintageNoise.noiseLevel = it
+                    },
+                    valueRange = 0f..1f
+                )
+                Text("Хруст: ${"%.2f".format(crackleIntensity)}", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = crackleIntensity,
+                    onValueChange = { 
+                        crackleIntensity = it
+                        effectsManager.vintageNoise.crackleIntensity = it
+                    },
+                    valueRange = 0f..1f
+                )
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(16.dp)
+        ) {
+            Icon(Icons.Default.ArrowBack, "Back", tint = Color(0xFF556B55))
+        }
     }
 }
