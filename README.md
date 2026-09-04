@@ -1,24 +1,40 @@
-Ссылка на апк преальфа 0.1:
+# CirclePlayer v1.0
 
-https://github.com/KrechkoVsevolod201/CirclePlayer/blob/master/app/app-release.apk
+Плёночный музыкальный плеер для Android в стиле iPod Classic: колесо управления, эффекты винила и скринсейвер.
 
-Ссылка на дебаг апк преальфа 0.2:
+## Скриншоты
 
-https://github.com/KrechkoVsevolod201/CirclePlayer/blob/master/app/app-debug.apk
+| Плеер (тёмная тема) | Плеер (светлая тема) | Выбор трека колесом |
+|---|---|---|
+| ![](screenshots/01_player_dark.png) | ![](screenshots/02_player_light.png) | ![](screenshots/03_track_list.png) |
 
-Приложение представляет собой сочетание старого подхода к управлению плеером и современных сенсорных устройств.
+| Меню эффектов | Настройки | Скринсейвер |
+|---|---|---|
+| ![](screenshots/04_effects_menu.png) | ![](screenshots/05_settings.png) | ![](screenshots/06_screensaver.png) |
 
-У плеера пока примитивный дизайн, но уже полноценный набор функций:
-1) В нём можно запускать вашу музыку
-2) Можно выбирать плейлисты в папках на вашем телефоне
-3) Можно перематывать трек с помощью колёсика управления
-4) Можно применять интересные винтажные звуковые эффекты
+## Возможности
 
-Основная фишка CirclePlayer - это колёсико ClickWheel
+- **Колесо управления (Click Wheel)** — прокрутка списка жестом с тактильной отдачей, play/pause в центре, статичные кнопки перемотки и перехода между треками
+- **Выбор трека колесом** — панель плеера превращается в список, выделение крутится колесом
+- **Эффекты плёнки** (обрабатывают PCM в реальном времени через `AudioProcessor`):
+  - **Wow & Flutter** — плавающая нестабильность скорости
+  - **Volume Detonation** — лёгкая перегрузка на пиках амплитуды
+  - **Chorus** — классический хор с модулируемой задержкой
+  - **Vintage Noise** — белый шум и хруст винила
+- **Скринсейвер** — вращающаяся виниловая пластинка (вручную или автоматически через 10 с бездействия при воспроизведении)
+- **Светлая / тёмная тема**, выбор папки с музыкой, shuffle и repeat (all / one)
+- Корректная обработка системного жеста «назад»
 
-Оно помогает листать треки с приятной виброотдачей, помогает запускать и ставить их на паузу, а также позволяет перематывать трек до интересного вам момента!
+## APK
 
-<img width="212" height="472" alt="image" src="https://github.com/user-attachments/assets/ae7a5615-685c-4b7c-944b-92b5d23fef6b" />
-<img width="213" height="472" alt="image" src="https://github.com/user-attachments/assets/541487c3-0ebb-4172-b4e2-91191f357783" />
-<img width="213" height="471" alt="image" src="https://github.com/user-attachments/assets/3983d1b7-0894-4b0d-9993-23c4fc114ca4" />
-<img width="211" height="470" alt="image" src="https://github.com/user-attachments/assets/9dfcc62d-d6bf-49b4-8840-043ea542f4b4" />
+- Релизный билд: [app/app-release.apk](app/app-release.apk)
+- Отладочный билд: [app/app-debug.apk](app/app-debug.apk)
+
+> Минимальный Android: 7.1 (API 25)
+
+## Сборка
+
+```bash
+./gradlew assembleDebug   # отладочный
+./gradlew assembleRelease # релизный (подписан debug-ключом)
+```

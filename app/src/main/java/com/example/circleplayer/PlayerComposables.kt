@@ -3,61 +3,88 @@ package com.example.circleplayer
 import android.annotation.SuppressLint
 import android.net.Uri
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.sp
 import androidx.compose.animation.core.*
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.circleplayer.audio.EffectsManager
 import com.example.circleplayer.audio.EffectsRenderersFactory
+import com.example.circleplayer.ui.theme.LocalPlayerPalette
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.content.Context
-import androidx.compose.runtime.saveable.rememberSaveable
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.sin
 
 // =============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===============
 
 private fun formatTime(ms: Long): String {
-    if (ms < 0) return "--:--"
+    if (ms < 0) return "00:00"
     val totalSeconds = (ms / 1000).toInt()
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return String.format("%02d:%02d", minutes, seconds)
 }
 
-private fun Float.toRadians() = this * (kotlin.math.PI.toFloat() / 180f)
+private fun calculateAngle(point: Offset, center: Offset): Float {
+    val dx = point.x - center.x
+    val dy = point.y - center.y
+    return Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+}
 
 // =============== ОСНОВНОЙ КОМПОЗЕБЛ ===============
 
@@ -67,7 +94,9 @@ fun MusicPlayerApp(
     initialExoPlayer: ExoPlayer,
     effectsManager: EffectsManager,
     initialFolderPath: String? = null,
-    onFolderSelect: () -> Unit
+    onFolderSelect: () -> Unit,
+    darkTheme: Boolean,
+    onToggleTheme: () -> Unit
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -79,8 +108,19 @@ fun MusicPlayerApp(
 
     var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
     var isPlaying by remember { mutableStateOf(false) }
-    var isFullScreen by remember { mutableStateOf(false) }
     var showEffectsMenu by remember { mutableStateOf(false) }
+    var listMode by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showVinyl by remember { mutableStateOf(false) }
+
+    val prefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    var screensaverEnabled by remember {
+        mutableStateOf(prefs.getBoolean("screensaver_enabled", false))
+    }
+    var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    var shuffleEnabled by remember { mutableStateOf(false) }
+    var repeatMode by remember { mutableStateOf(0) } // 0 - off, 1 - all, 2 - one
 
     var useEffects by remember { mutableStateOf(false) }
     var previousUseEffects by remember { mutableStateOf(false) }
@@ -89,7 +129,6 @@ fun MusicPlayerApp(
 
     var lastScrollTime by remember { mutableLongStateOf(0L) }
 
-    // Sync folder path from Activity when picker updates prefs-backed state
     LaunchedEffect(initialFolderPath) {
         if (initialFolderPath != currentFolderPath) {
             currentFolderPath = initialFolderPath
@@ -187,6 +226,46 @@ fun MusicPlayerApp(
         }
     }
 
+    // Автопереход к следующему треку с учётом shuffle/repeat
+    DisposableEffect(currentPlayer, playerGeneration) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState != Player.STATE_ENDED) return
+                if (tracks.isEmpty()) return
+
+                if (repeatMode == 2) {
+                    currentPlayer.seekTo(0)
+                    currentPlayer.playWhenReady = true
+                    return
+                }
+
+                val next: Int? = if (shuffleEnabled) {
+                    if (tracks.size == 1) selectedIndex
+                    else {
+                        var r = kotlin.random.Random.nextInt(tracks.size)
+                        while (r == selectedIndex) r = kotlin.random.Random.nextInt(tracks.size)
+                        r
+                    }
+                } else when {
+                    selectedIndex + 1 < tracks.size -> selectedIndex + 1
+                    repeatMode == 1 -> 0
+                    else -> null
+                }
+
+                if (next != null) {
+                    if (next == selectedIndex) {
+                        currentPlayer.seekTo(0)
+                        currentPlayer.playWhenReady = true
+                    } else {
+                        selectedIndex = next
+                    }
+                }
+            }
+        }
+        currentPlayer.addListener(listener)
+        onDispose { currentPlayer.removeListener(listener) }
+    }
+
     fun handleTrackSelection(newIndex: Int) {
         if (newIndex in tracks.indices && newIndex != selectedIndex) {
             selectedIndex = newIndex
@@ -207,6 +286,23 @@ fun MusicPlayerApp(
         }
     }
 
+    fun handlePlayPause() {
+        isPlaying = !isPlaying
+        currentPlayer.playWhenReady = isPlaying
+        if (isPlaying && tracks.isNotEmpty()) {
+            val track = tracks.getOrNull(selectedIndex)
+                ?: tracks.first().also { selectedIndex = 0 }
+            val currentUri = currentPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
+            if (currentUri != track.uri) {
+                currentPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(track.uri)))
+                currentPlayer.prepare()
+            }
+            currentPlayer.play()
+        } else {
+            currentPlayer.pause()
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             if (currentPlayer !== initialExoPlayer) {
@@ -224,8 +320,10 @@ fun MusicPlayerApp(
         val callback = object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
+                    showVinyl -> showVinyl = false
+                    showSettings -> showSettings = false
                     showEffectsMenu -> showEffectsMenu = false
-                    isFullScreen -> isFullScreen = false
+                    listMode -> listMode = false
                     else -> {
                         isEnabled = false
                         backPressedDispatcher?.onBackPressed()
@@ -237,175 +335,486 @@ fun MusicPlayerApp(
         onDispose { callback.remove() }
     }
 
-    if (showEffectsMenu) {
-        EffectsMenu(
-            effectsManager = effectsManager,
-            useEffects = useEffects,
-            onUseEffectsChange = { useEffects = it },
-            onBack = { showEffectsMenu = false }
-        )
-    } else if (isFullScreen) {
-        FullScreenPlayer(
-            track = tracks.getOrNull(selectedIndex),
-            exoPlayer = currentPlayer,
-            isPlaying = isPlaying,
-            onPlayPause = {
-                isPlaying = !isPlaying
-                currentPlayer.playWhenReady = isPlaying
-                if (isPlaying) currentPlayer.play() else currentPlayer.pause()
-            },
-            onBack = { isFullScreen = false }
-        )
-    } else {
-        iPodView(
-            tracks = tracks,
-            selectedIndex = selectedIndex,
-            isPlaying = isPlaying,
-            onTrackSelected = { index -> handleTrackSelection(index) },
-            onPlayPause = {
-                isPlaying = !isPlaying
-                currentPlayer.playWhenReady = isPlaying
-                if (isPlaying && tracks.isNotEmpty()) {
-                    val track = tracks.getOrNull(selectedIndex)
-                        ?: tracks.first().also { selectedIndex = 0 }
-                    val mediaItem = MediaItem.fromUri(Uri.parse(track.uri))
-                    val currentUri = currentPlayer.currentMediaItem?.localConfiguration?.uri?.toString()
-                    if (currentUri != track.uri) {
-                        currentPlayer.setMediaItem(mediaItem)
-                        currentPlayer.prepare()
-                    }
-                    currentPlayer.play()
-                } else {
-                    currentPlayer.pause()
+    // Скринсейвер при воспроизведении: через 10 секунд бездействия
+    LaunchedEffect(
+        screensaverEnabled, isPlaying, lastInteraction,
+        showVinyl, showSettings, showEffectsMenu
+    ) {
+        if (!screensaverEnabled || !isPlaying) return@LaunchedEffect
+        if (showVinyl || showSettings || showEffectsMenu) return@LaunchedEffect
+        delay(10_000)
+        if (System.currentTimeMillis() - lastInteraction >= 9_500) {
+            showVinyl = true
+        }
+    }
+
+    fun handleListButton() {
+        when {
+            showVinyl -> showVinyl = false
+            listMode -> {
+                listMode = false
+                if (screensaverEnabled) showVinyl = true
+            }
+            else -> listMode = true
+        }
+    }
+
+    // Скринсейвер доступен только при включённой настройке
+    LaunchedEffect(screensaverEnabled) {
+        if (!screensaverEnabled) showVinyl = false
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    lastInteraction = System.currentTimeMillis()
+                    do {
+                        val event = awaitPointerEvent()
+                        if (!event.changes.any { it.pressed }) break
+                    } while (true)
+                    lastInteraction = System.currentTimeMillis()
                 }
-            },
-            onMore = { isFullScreen = true },
-            onEffectsClick = { showEffectsMenu = true },
-            onFolderSelect = onFolderSelect,
-            onScroll = { stepCount -> handleScroll(stepCount) }
-        )
+            }
+    ) {
+        when {
+            showEffectsMenu -> EffectsMenu(
+                effectsManager = effectsManager,
+                useEffects = useEffects,
+                onUseEffectsChange = { useEffects = it },
+                onBack = { showEffectsMenu = false }
+            )
+            showSettings -> SettingsScreen(
+                darkTheme = darkTheme,
+                onToggleTheme = onToggleTheme,
+                screensaverEnabled = screensaverEnabled,
+                onToggleScreensaver = {
+                    screensaverEnabled = it
+                    prefs.edit().putBoolean("screensaver_enabled", it).apply()
+                },
+                onBack = { showSettings = false }
+            )
+            else -> NowPlayingScreen(
+                tracks = tracks,
+                selectedIndex = selectedIndex,
+                currentPlayer = currentPlayer,
+                isPlaying = isPlaying,
+                shuffleEnabled = shuffleEnabled,
+                repeatMode = repeatMode,
+                darkTheme = darkTheme,
+                listMode = listMode,
+                onToggleShuffle = { shuffleEnabled = !shuffleEnabled },
+                onCycleRepeat = { repeatMode = (repeatMode + 1) % 3 },
+                onPlayPause = {
+                    if (listMode) {
+                        if (tracks.isNotEmpty()) {
+                            listMode = false
+                            isPlaying = true
+                            currentPlayer.playWhenReady = true
+                            currentPlayer.play()
+                        }
+                    } else {
+                        handlePlayPause()
+                    }
+                },
+                onTrackPlay = { index ->
+                    if (index != selectedIndex) {
+                        selectedIndex = index
+                    } else if (tracks.isNotEmpty()) {
+                        isPlaying = true
+                        currentPlayer.playWhenReady = true
+                        currentPlayer.play()
+                    }
+                    listMode = false
+                },
+                onPreviousTrack = { handleScroll(-1) },
+                onNextTrack = { handleScroll(1) },
+                onSkipForward = {
+                    if (currentPlayer.duration > 0) {
+                        currentPlayer.seekTo(
+                            (currentPlayer.currentPosition + 10000)
+                                .coerceAtMost(currentPlayer.duration)
+                        )
+                    }
+                },
+                onSkipBackward = {
+                    currentPlayer.seekTo((currentPlayer.currentPosition - 10000).coerceAtLeast(0L))
+                },
+                onScroll = { stepCount -> handleScroll(stepCount) },
+                onListButton = { handleListButton() },
+                onOpenEffects = { showEffectsMenu = true },
+                onOpenSettings = { showSettings = true },
+                onFolderSelect = onFolderSelect,
+                onToggleTheme = onToggleTheme
+            )
+        }
+
+        if (showVinyl) {
+            VinylScreensaver(
+                track = tracks.getOrNull(selectedIndex),
+                isPlaying = isPlaying || currentPlayer.isPlaying,
+                onExit = { showVinyl = false }
+            )
+        }
     }
 }
 
-// =============== iPodView ===============
+// =============== Экран "Сейчас играет" ===============
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun iPodView(
+fun NowPlayingScreen(
     tracks: List<AudioTrack>,
     selectedIndex: Int,
+    currentPlayer: ExoPlayer,
     isPlaying: Boolean,
-    onTrackSelected: (Int) -> Unit,
+    shuffleEnabled: Boolean,
+    repeatMode: Int,
+    darkTheme: Boolean,
+    listMode: Boolean,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
     onPlayPause: () -> Unit,
-    onMore: () -> Unit,
-    onEffectsClick: () -> Unit,
+    onTrackPlay: (Int) -> Unit,
+    onPreviousTrack: () -> Unit,
+    onNextTrack: () -> Unit,
+    onSkipForward: () -> Unit,
+    onSkipBackward: () -> Unit,
+    onScroll: (Int) -> Unit,
+    onListButton: () -> Unit,
+    onOpenEffects: () -> Unit,
+    onOpenSettings: () -> Unit,
     onFolderSelect: () -> Unit,
-    onScroll: (Int) -> Unit
+    onToggleTheme: () -> Unit
 ) {
-    val lazyListState = rememberLazyListState()
-    var isUserScrolling by remember { mutableStateOf(false) }
+    val palette = LocalPlayerPalette.current
+    val track = tracks.getOrNull(selectedIndex)
 
-    // 🔑 Улучшенная логика авто-прокрутки
-    LaunchedEffect(selectedIndex) {
-        if (tracks.isNotEmpty() && selectedIndex in tracks.indices && !isUserScrolling) {
-            // Небольшая задержка для предотвращения конфликтов
-            delay(50)
-            if (!isUserScrolling) {
-                lazyListState.animateScrollToItem(selectedIndex)
-            }
+    var currentPosition by remember(currentPlayer) { mutableLongStateOf(currentPlayer.currentPosition) }
+
+    LaunchedEffect(currentPlayer, isPlaying) {
+        while (true) {
+            currentPosition = currentPlayer.currentPosition
+            delay(250)
         }
     }
 
-    // 🔑 Отслеживаем пользовательский скролл
-    LaunchedEffect(lazyListState.isScrollInProgress) {
-        isUserScrolling = lazyListState.isScrollInProgress
-        if (!lazyListState.isScrollInProgress) {
-            // После завершения скролла можно снова включить авто-прокрутку
-            delay(300)
-            isUserScrolling = false
-        }
-    }
+    val duration = currentPlayer.duration.takeIf { it > 0 } ?: (track?.duration ?: 0L)
+    val progress = if (duration > 0) {
+        (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+    } else 0f
+
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var dragProgress by remember { mutableFloatStateOf(0f) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
-            .border(2.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
-            .padding(8.dp)
+            .background(palette.background)
+            .padding(horizontal = 20.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .background(Color(0xFFE8F0E8), RoundedCornerShape(8.dp))
-                .padding(8.dp)
-                .border(1.dp, Color(0xFFA8B5A0), RoundedCornerShape(8.dp))
+        // Верхняя панель: тема
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            LazyColumn(
-                state = lazyListState,
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                // 🔑 Улучшенный ключ - комбинация URI и индекса
-                items(tracks.size, key = { index -> "${tracks[index].uri}_$index" }) { index ->
-                    TrackRow(
-                        track = tracks[index],
-                        isSelected = index == selectedIndex,
-                        onClick = { onTrackSelected(index) }
-                    )
-                }
+            IconButton(onClick = onToggleTheme) {
+                Icon(
+                    if (darkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                    "Тема",
+                    tint = palette.textSecondary
+                )
             }
-
-            Text(
-                text = "${selectedIndex + 1} / ${tracks.size}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xFF556B55),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .background(Color.White.copy(alpha = 0.8f), CircleShape)
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-            )
         }
 
+        // Область диска / выбор трека колесом
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .padding(top = 16.dp),
+                .weight(1.4f)
+                .background(
+                    if (listMode) palette.surface else palette.discPanel,
+                    RoundedCornerShape(10.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (listMode) {
+                val panelListState = rememberLazyListState()
+
+                LaunchedEffect(selectedIndex, tracks) {
+                    if (listMode && selectedIndex in tracks.indices) {
+                        val viewportHeight = panelListState.layoutInfo.viewportEndOffset -
+                            panelListState.layoutInfo.viewportStartOffset
+                        val offset = -(viewportHeight / 2 - 60).coerceAtLeast(0)
+                        panelListState.animateScrollToItem(selectedIndex, offset)
+                    }
+                }
+
+                LazyColumn(
+                    state = panelListState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp)
+                ) {
+                    itemsIndexed(tracks, key = { index, t -> "${t.uri}_$index" }) { index, track ->
+                        TrackRow(
+                            track = track,
+                            isSelected = index == selectedIndex,
+                            onClick = { onTrackPlay(index) }
+                        )
+                    }
+                }
+            } else {
+                DiscArt(isPlaying = isPlaying)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Marquee-строка с названием
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onToggleShuffle) {
+                Icon(
+                    Icons.Default.Shuffle,
+                    "Перемешивание",
+                    tint = if (shuffleEnabled) palette.wheelIcon else palette.textSecondary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .background(palette.chipBackground, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                val label = if (track != null) {
+                    "${track.title} - ${track.artist}"
+                } else {
+                    "Нет треков"
+                }
+                Text(
+                    text = label,
+                    color = palette.chipText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                )
+            }
+
+            IconButton(onClick = onCycleRepeat) {
+                Icon(
+                    if (repeatMode == 2) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                    "Повтор",
+                    tint = if (repeatMode > 0) palette.wheelIcon else palette.textSecondary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Прогресс
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Slider(
+                value = if (isDraggingSlider) dragProgress else progress,
+                onValueChange = {
+                    isDraggingSlider = true
+                    dragProgress = it
+                },
+                onValueChangeFinished = {
+                    if (duration > 0) {
+                        currentPlayer.seekTo((dragProgress * duration).toLong())
+                        currentPosition = (dragProgress * duration).toLong()
+                    }
+                    isDraggingSlider = false
+                },
+                enabled = duration > 0,
+                colors = SliderDefaults.colors(
+                    thumbColor = palette.wheelIcon,
+                    activeTrackColor = palette.progressActive,
+                    inactiveTrackColor = palette.progressTrack
+                )
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    formatTime(currentPosition),
+                    color = palette.text,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
+                Text(
+                    formatTime(duration),
+                    color = palette.text,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
+            }
+        }
+
+        // Колесо управления
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1.3f),
             contentAlignment = Alignment.Center
         ) {
             ClickWheel(
                 isPlaying = isPlaying,
-                onScroll = { stepCount ->
-                    onScroll(stepCount) // 🔑 Используем новый callback
-                },
-                onCenterClick = onPlayPause
+                onScroll = onScroll,
+                onCenterClick = onPlayPause,
+                onSkipForward = onSkipForward,
+                onSkipBackward = onSkipBackward,
+                onPreviousTrack = onPreviousTrack,
+                onNextTrack = onNextTrack
             )
 
-            Row(
+            SideCircleButton(
+                icon = if (listMode) Icons.Default.Close else Icons.AutoMirrored.Filled.List,
+                description = if (listMode) "Выйти из списка" else "Список треков",
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(top = 16.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly
+                    .align(Alignment.CenterStart)
+                    .offset(x = 12.dp, y = (-64).dp)
+            ) { onListButton() }
+
+            SideCircleButton(
+                icon = Icons.Default.Tune,
+                description = "Эффекты",
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .offset(x = (-12).dp, y = (-64).dp)
+            ) { onOpenEffects() }
+
+            // Кнопка выбора папки — в нижнем левом углу
+            IconButton(
+                onClick = onFolderSelect,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(bottom = 4.dp)
             ) {
-                IconButton(onClick = { /* Back */ }) {
-                    Icon(Icons.Default.ArrowBack, "Back", tint = Color.Gray)
-                }
-                IconButton(onClick = onEffectsClick) {
-                    Icon(Icons.Default.MusicNote, "Effects", tint = Color(0xFF556B55))
-                }
-                IconButton(onClick = onFolderSelect) {
-                    Icon(Icons.Default.Folder, "Select Folder", tint = Color(0xFF556B55))
-                }
-                IconButton(onClick = onMore) {
-                    Icon(Icons.Default.MoreVert, "More", tint = Color.Gray)
-                }
+                Icon(Icons.Default.Folder, "Выбрать папку", tint = palette.textSecondary)
+            }
+
+            // Кнопка настроек — в нижнем правом углу
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 4.dp)
+            ) {
+                Icon(Icons.Default.Settings, "Настройки", tint = palette.textSecondary)
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
-// =============== ClickWheel ===============
+@Composable
+private fun SideCircleButton(
+    icon: ImageVector,
+    description: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val palette = LocalPlayerPalette.current
+    Box(
+        modifier = modifier
+            .size(72.dp)
+            .shadow(3.dp, CircleShape)
+            .background(palette.sideButton, CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, description, tint = palette.sideButtonIcon, modifier = Modifier.size(30.dp))
+    }
+}
+
+@Composable
+private fun DiscArt(isPlaying: Boolean) {
+    val palette = LocalPlayerPalette.current
+    val rotation = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (true) {
+                rotation.animateTo(
+                    rotation.value + 360f,
+                    animationSpec = tween(3000, easing = LinearEasing)
+                )
+            }
+        }
+    }
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth(0.62f)
+            .aspectRatio(1f)
+            .graphicsLayer { rotationZ = rotation.value }
+    ) {
+        val r = min(size.width, size.height) / 2f
+
+        // Тело диска
+        drawCircle(
+            color = palette.discBody,
+            radius = r,
+            center = center
+        )
+        // Внешний ободок
+        drawCircle(
+            color = palette.discRim,
+            radius = r - 1.dp.toPx(),
+            center = center,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+        )
+        // Декоративные кольца
+        drawCircle(
+            color = palette.discRim.copy(alpha = 0.5f),
+            radius = r * 0.72f,
+            center = center,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
+        )
+        drawCircle(
+            color = palette.discRim.copy(alpha = 0.35f),
+            radius = r * 0.45f,
+            center = center,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
+        )
+        // Метка, показывающая вращение
+        rotate(0f, pivot = center) {
+            drawLine(
+                color = palette.discRim.copy(alpha = 0.6f),
+                start = Offset(center.x, center.y - r * 0.86f),
+                end = Offset(center.x, center.y - r * 0.52f),
+                strokeWidth = 1.5.dp.toPx()
+            )
+        }
+        // Центральное отверстие
+        drawCircle(color = palette.discHole, radius = r * 0.16f, center = center)
+        drawCircle(
+            color = palette.discHoleInner,
+            radius = r * 0.07f,
+            center = center
+        )
+    }
+}
+
+// =============== ClickWheel (Play не вращается) ===============
 
 @SuppressLint("RestrictedApi")
 @Composable
@@ -413,13 +822,17 @@ fun ClickWheel(
     isPlaying: Boolean = false,
     onScroll: (Int) -> Unit,
     onCenterClick: () -> Unit,
+    onSkipForward: () -> Unit,
+    onSkipBackward: () -> Unit,
+    onPreviousTrack: () -> Unit,
+    onNextTrack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val palette = LocalPlayerPalette.current
     val rotation = remember { Animatable(0f) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Защита от слишком быстрого скролла
     var lastScrollTime by remember { mutableLongStateOf(0L) }
 
     val vibrate = remember {
@@ -447,216 +860,193 @@ fun ClickWheel(
         }
     }
 
-    // Отслеживаем угловое положение
-    var startAngle by remember { mutableStateOf(0f) }
     var lastAngle by remember { mutableStateOf(0f) }
     var accumulatedRotation by remember { mutableStateOf(0f) }
     var lastReportedStep by remember { mutableStateOf(0) }
 
     Box(
         modifier = modifier
-            .size(240.dp)
-            .background(Color(0xFFE0E0E0), shape = CircleShape)
-            .pointerInput(Unit) {
-                val center = Offset((size.width / 2).toFloat(), (size.height / 2).toFloat())
-
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        // Вычисляем начальный угол относительно центра
-                        startAngle = calculateAngle(offset, center)
-                        lastAngle = startAngle
-                        accumulatedRotation = 0f
-                        lastReportedStep = 0
-                        lastScrollTime = System.currentTimeMillis()
-                    },
-                    onDrag = { change, _ ->
-                        val now = System.currentTimeMillis()
-                        if (now - lastScrollTime < 50) return@detectDragGestures
-
-                        // Вычисляем текущий угол
-                        val currentAngle = calculateAngle(change.position, center)
-
-                        // Вычисляем изменение угла
-                        var deltaAngle = currentAngle - lastAngle
-
-                        // Обрабатываем переход через 0/360 градусов
-                        if (deltaAngle > 180f) deltaAngle -= 360f
-                        if (deltaAngle < -180f) deltaAngle += 360f
-
-                        accumulatedRotation += deltaAngle
-                        lastAngle = currentAngle
-
-                        // Определяем шаг (каждые 30 градусов = 1 шаг)
-                        val stepSize = 30f
-                        val currentStep = (accumulatedRotation / stepSize).toInt()
-
-                        if (currentStep != lastReportedStep) {
-                            val diff = currentStep - lastReportedStep
-                            // Положительное значение = по часовой стрелке (вперед)
-                            // Отрицательное значение = против часовой стрелки (назад)
-                            onScroll(diff)
-                            vibrate()
-                            lastReportedStep = currentStep
-                            lastScrollTime = now
-                        }
-
-                        // Визуальное вращение колеса
-                        val targetRotation = accumulatedRotation * 1.5f
-                        if (rotation.targetValue != targetRotation) {
-                            coroutineScope.launch {
-                                rotation.animateTo(
-                                    targetRotation,
-                                    animationSpec = tween(100, easing = LinearEasing)
-                                )
-                            }
-                        }
-                    },
-                    onDragEnd = {
-                        coroutineScope.launch {
-                            rotation.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
-                        }
-                    }
-                )
-            }
-            .graphicsLayer { rotationZ = rotation.value },
+            .size(280.dp)
+            .shadow(6.dp, CircleShape)
+            .background(palette.wheel, CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            // Рисуем метки на колесе для визуализации вращения
-            val radius = size.minDimension / 2
-            for (i in 0 until 12) {
-                val angle = Math.toRadians((i * 30).toDouble())
-                val x = center.x + (radius * 0.85f * cos(angle)).toFloat()
-                val y = center.y + (radius * 0.85f * sin(angle)).toFloat()
-                drawCircle(
-                    color = Color(0xFF888888),
-                    radius = 8f,
-                    center = Offset(x, y)
-                )
-            }
-        }
-
+        // Вращающийся слой: только разметка кольца, без кнопок
         Box(
             modifier = Modifier
-                .size(64.dp)
-                .background(Color(0xFF556B55), CircleShape)
-                .clickable { onCenterClick() },
-            contentAlignment = Alignment.Center
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    val center = Offset((size.width / 2).toFloat(), (size.height / 2).toFloat())
+
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            lastAngle = calculateAngle(offset, center)
+                            accumulatedRotation = 0f
+                            lastReportedStep = 0
+                        },
+                        onDrag = { change, _ ->
+                            val now = System.currentTimeMillis()
+                            if (now - lastScrollTime < 50) return@detectDragGestures
+
+                            val currentAngle = calculateAngle(change.position, center)
+
+                            var deltaAngle = currentAngle - lastAngle
+                            if (deltaAngle > 180f) deltaAngle -= 360f
+                            if (deltaAngle < -180f) deltaAngle += 360f
+
+                            accumulatedRotation += deltaAngle
+                            lastAngle = currentAngle
+
+                            val stepSize = 30f
+                            val currentStep = (accumulatedRotation / stepSize).toInt()
+
+                            if (currentStep != lastReportedStep) {
+                                val diff = currentStep - lastReportedStep
+                                onScroll(diff)
+                                vibrate()
+                                lastReportedStep = currentStep
+                                lastScrollTime = now
+                            }
+
+                            val targetRotation = accumulatedRotation * 1.5f
+                            if (rotation.targetValue != targetRotation) {
+                                coroutineScope.launch {
+                                    rotation.animateTo(
+                                        targetRotation,
+                                        animationSpec = tween(100, easing = LinearEasing)
+                                    )
+                                }
+                            }
+                        },
+                        onDragEnd = {
+                            coroutineScope.launch {
+                                rotation.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+                            }
+                        }
+                    )
+                }
+                .graphicsLayer { rotationZ = rotation.value }
         ) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play",
-                tint = Color.White,
-                modifier = Modifier.size(32.dp)
-            )
-        }
-    }
-}
-
-// Вспомогательная функция для вычисления угла относительно центра
-private fun calculateAngle(point: Offset, center: Offset): Float {
-    val dx = point.x - center.x
-    val dy = point.y - center.y
-    return Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
-}
-// =============== TrackRow ===============
-
-@Composable
-fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (isSelected) Color.LightGray else Color.Transparent)
-            .clickable { onClick() }
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column {
-            Text(
-                text = track.title,
-                fontWeight = if (isSelected) androidx.compose.ui.text.font.FontWeight.Bold else androidx.compose.ui.text.font.FontWeight.Normal
-            )
-            Text(track.artist, style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
-// =============== FullScreenPlayer ===============
-
-@Composable
-fun FullScreenPlayer(
-    track: AudioTrack?,
-    exoPlayer: ExoPlayer,
-    isPlaying: Boolean,
-    onPlayPause: () -> Unit,
-    onBack: () -> Unit
-) {
-    var currentPosition by remember { mutableStateOf(exoPlayer.currentPosition) }
-
-    LaunchedEffect(isPlaying) {
-        if (!isPlaying) return@LaunchedEffect
-        while (true) {
-            currentPosition = exoPlayer.currentPosition
-            delay(100)
-        }
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        track?.let {
-            val totalTime = if (exoPlayer.duration > 0) formatTime(exoPlayer.duration) else "--:--"
-            val currentTime = formatTime(currentPosition)
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 64.dp)
-            ) {
-                Text(it.title, style = MaterialTheme.typography.headlineMedium, color = Color(0xFF333333))
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(it.artist, style = MaterialTheme.typography.titleMedium, color = Color(0xFF555555))
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("$currentTime / $totalTime", style = MaterialTheme.typography.bodyMedium)
-
-                if (exoPlayer.duration > 0) {
-                    LinearProgressIndicator(
-                        progress = (currentPosition.toFloat() / exoPlayer.duration.toFloat()).coerceIn(0f, 1f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 48.dp)
-                            .padding(top = 8.dp),
-                        color = Color(0xFF556B55)
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val radius = size.minDimension / 2
+                for (i in 0 until 12) {
+                    val angle = Math.toRadians((i * 30).toDouble())
+                    val x = center.x + (radius * 0.94f * cos(angle)).toFloat()
+                    val y = center.y + (radius * 0.94f * sin(angle)).toFloat()
+                    drawCircle(
+                        color = palette.wheelEdge,
+                        radius = 4f,
+                        center = Offset(x, y)
                     )
                 }
             }
         }
 
-        ClickWheel(
-            isPlaying = isPlaying,
-            onScroll = { stepCount ->
-                if (exoPlayer.duration <= 0) return@ClickWheel
-                val stepMs = 5000L
-                val newPosition = (exoPlayer.currentPosition + stepCount * stepMs).toLong()
-                    .coerceIn(0L, exoPlayer.duration)
-                exoPlayer.seekTo(newPosition)
-                currentPosition = newPosition
-            },
-            onCenterClick = onPlayPause,
+        // Стрелки — статичны, не вращаются
+        Icon(
+            imageVector = Icons.Default.FastForward,
+            contentDescription = "Вперёд на 10 секунд",
+            tint = palette.wheelIcon,
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 32.dp)
+                .align(Alignment.TopCenter)
+                .padding(top = 22.dp)
+                .size(34.dp)
+                .clickable { onSkipForward() }
         )
 
-        IconButton(
-            onClick = onBack,
+        Icon(
+            imageVector = Icons.Default.FastRewind,
+            contentDescription = "Назад на 10 секунд",
+            tint = palette.wheelIcon,
             modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(16.dp)
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 22.dp)
+                .size(34.dp)
+                .clickable { onSkipBackward() }
+        )
+
+        Icon(
+            imageVector = Icons.Default.SkipPrevious,
+            contentDescription = "Предыдущий трек",
+            tint = palette.wheelIcon,
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 22.dp)
+                .size(34.dp)
+                .clickable { onPreviousTrack() }
+        )
+
+        Icon(
+            imageVector = Icons.Default.SkipNext,
+            contentDescription = "Следующий трек",
+            tint = palette.wheelIcon,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 22.dp)
+                .size(34.dp)
+                .clickable { onNextTrack() }
+        )
+
+        // Центральная кнопка Play/Pause — статична
+        Box(
+            modifier = Modifier
+                .size(88.dp)
+                .background(palette.centerButton, CircleShape)
+                .clickable { onCenterClick() },
+            contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.ArrowBack, "Back", tint = Color(0xFF556B55))
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) "Пауза" else "Воспроизвести",
+                tint = palette.centerIcon,
+                modifier = Modifier.size(40.dp)
+            )
         }
     }
 }
+
+// =============== Строка трека ===============
+
+@Composable
+fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
+    val palette = LocalPlayerPalette.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .background(if (isSelected) palette.listRowSelected else Color.Transparent)
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isSelected) {
+            Icon(
+                Icons.Default.PlayArrow,
+                null,
+                tint = palette.text,
+                modifier = Modifier.size(14.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+        }
+        Text(
+            text = "${track.title} - ${track.artist}",
+            fontSize = 13.sp,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+            color = palette.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = formatTime(track.duration),
+            fontSize = 11.sp,
+            color = palette.textSecondary
+        )
+    }
+}
+
+// =============== Меню эффектов ===============
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -666,275 +1056,201 @@ fun EffectsMenu(
     onUseEffectsChange: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
+    val palette = LocalPlayerPalette.current
+
     var wowEnabled by remember { mutableStateOf(effectsManager.wowFlutter.enabled) }
     var wowDepth by remember { mutableFloatStateOf(effectsManager.wowFlutter.depth) }
     var wowRate by remember { mutableFloatStateOf(effectsManager.wowFlutter.rate) }
-    
+
     var detonationEnabled by remember { mutableStateOf(effectsManager.volumeDetonation.enabled) }
     var detonationAmount by remember { mutableFloatStateOf(effectsManager.volumeDetonation.amount) }
-    
+
     var chorusEnabled by remember { mutableStateOf(effectsManager.chorus.enabled) }
     var chorusDepth by remember { mutableFloatStateOf(effectsManager.chorus.depth) }
     var chorusRate by remember { mutableFloatStateOf(effectsManager.chorus.rate) }
     var chorusMix by remember { mutableFloatStateOf(effectsManager.chorus.mix) }
-    
+
     var noiseEnabled by remember { mutableStateOf(effectsManager.vintageNoise.enabled) }
     var noiseLevel by remember { mutableFloatStateOf(effectsManager.vintageNoise.noiseLevel) }
     var crackleIntensity by remember { mutableFloatStateOf(effectsManager.vintageNoise.crackleIntensity) }
-    
-    Box(modifier = Modifier.fillMaxSize()) {
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.background)
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
+                .padding(bottom = 72.dp)
         ) {
             Text(
                 text = "Эффекты плёнки",
                 style = MaterialTheme.typography.headlineMedium,
-                color = Color(0xFF333333),
+                color = palette.text,
                 modifier = Modifier.padding(bottom = 16.dp)
             )
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFD0E8D0))
-            ) {
+            EffectCard {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "Включить эффекты",
                             style = MaterialTheme.typography.titleMedium,
-                            color = Color(0xFF333333)
+                            color = palette.text
                         )
                         Text(
                             text = "Переключает режим воспроизведения",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF556B55)
+                            color = palette.textSecondary
                         )
                     }
                     Switch(
                         checked = useEffects,
-                        onCheckedChange = onUseEffectsChange
+                        onCheckedChange = onUseEffectsChange,
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = palette.wheelIcon,
+                            checkedThumbColor = palette.centerIcon,
+                            uncheckedThumbColor = palette.textSecondary,
+                            uncheckedTrackColor = palette.progressTrack
+                        )
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Wow & Flutter",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF333333)
-                    )
-                    Switch(
-                        checked = wowEnabled,
-                        onCheckedChange = { 
-                            wowEnabled = it
-                            effectsManager.wowFlutter.enabled = it
-                        }
-                    )
-                }
-                Text(
-                    text = "Неравномерность скорости воспроизведения",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF556B55)
+            EffectCard(enabled = useEffects) {
+                EffectHeader(
+                    title = "Wow & Flutter",
+                    subtitle = "Неравномерность скорости воспроизведения",
+                    checked = wowEnabled,
+                    onCheckedChange = {
+                        wowEnabled = it
+                        effectsManager.wowFlutter.enabled = it
+                    }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Глубина: ${"%.2f".format(wowDepth)}", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Глубина",
                     value = wowDepth,
-                    onValueChange = { 
+                    range = 0f..1f,
+                    onValueChange = {
                         wowDepth = it
                         effectsManager.wowFlutter.depth = it
-                    },
-                    valueRange = 0f..1f
+                    }
                 )
-                Text("Частота: ${"%.2f".format(wowRate)} Гц", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Частота, Гц",
                     value = wowRate,
-                    onValueChange = { 
+                    range = 0.1f..5f,
+                    onValueChange = {
                         wowRate = it
                         effectsManager.wowFlutter.rate = it
-                    },
-                    valueRange = 0.1f..5f
+                    }
                 )
             }
-        }
 
-        Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Volume Detonation",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF333333)
-                    )
-                    Switch(
-                        checked = detonationEnabled,
-                        onCheckedChange = { 
-                            detonationEnabled = it
-                            effectsManager.volumeDetonation.enabled = it
-                        }
-                    )
-                }
-                Text(
-                    text = "Перегрузка при высокой амплитуде",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF556B55)
+            EffectCard(enabled = useEffects) {
+                EffectHeader(
+                    title = "Volume Detonation",
+                    subtitle = "Перегрузка при высокой амплитуде",
+                    checked = detonationEnabled,
+                    onCheckedChange = {
+                        detonationEnabled = it
+                        effectsManager.volumeDetonation.enabled = it
+                    }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Степень: ${"%.2f".format(detonationAmount)}", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Степень",
                     value = detonationAmount,
-                    onValueChange = { 
+                    range = 0f..1f,
+                    onValueChange = {
                         detonationAmount = it
                         effectsManager.volumeDetonation.amount = it
-                    },
-                    valueRange = 0f..1f
+                    }
                 )
             }
-        }
 
-        Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Chorus",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF333333)
-                    )
-                    Switch(
-                        checked = chorusEnabled,
-                        onCheckedChange = { 
-                            chorusEnabled = it
-                            effectsManager.chorus.enabled = it
-                        }
-                    )
-                }
-                Text(
-                    text = "Эффект хора",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF556B55)
+            EffectCard(enabled = useEffects) {
+                EffectHeader(
+                    title = "Chorus",
+                    subtitle = "Эффект хора",
+                    checked = chorusEnabled,
+                    onCheckedChange = {
+                        chorusEnabled = it
+                        effectsManager.chorus.enabled = it
+                    }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Глубина: ${"%.2f".format(chorusDepth)}", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Глубина",
                     value = chorusDepth,
-                    onValueChange = { 
+                    range = 0f..1f,
+                    onValueChange = {
                         chorusDepth = it
                         effectsManager.chorus.depth = it
-                    },
-                    valueRange = 0f..1f
+                    }
                 )
-                Text("Частота: ${"%.2f".format(chorusRate)} Гц", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Частота, Гц",
                     value = chorusRate,
-                    onValueChange = { 
+                    range = 0.1f..5f,
+                    onValueChange = {
                         chorusRate = it
                         effectsManager.chorus.rate = it
-                    },
-                    valueRange = 0.1f..5f
+                    }
                 )
-                Text("Микс: ${"%.2f".format(chorusMix)}", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Микс",
                     value = chorusMix,
-                    onValueChange = { 
+                    range = 0f..1f,
+                    onValueChange = {
                         chorusMix = it
                         effectsManager.chorus.mix = it
-                    },
-                    valueRange = 0f..1f
+                    }
                 )
             }
-        }
 
-        Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0E8))
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Vintage Noise",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFF333333)
-                    )
-                    Switch(
-                        checked = noiseEnabled,
-                        onCheckedChange = { 
-                            noiseEnabled = it
-                            effectsManager.vintageNoise.enabled = it
-                        }
-                    )
-                }
-                Text(
-                    text = "Шум и хруст винила",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF556B55)
+            EffectCard(enabled = useEffects) {
+                EffectHeader(
+                    title = "Vintage Noise",
+                    subtitle = "Шум и хруст винила",
+                    checked = noiseEnabled,
+                    onCheckedChange = {
+                        noiseEnabled = it
+                        effectsManager.vintageNoise.enabled = it
+                    }
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Уровень шума: ${"%.2f".format(noiseLevel)}", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Уровень шума",
                     value = noiseLevel,
-                    onValueChange = { 
+                    range = 0f..1f,
+                    onValueChange = {
                         noiseLevel = it
                         effectsManager.vintageNoise.noiseLevel = it
-                    },
-                    valueRange = 0f..1f
+                    }
                 )
-                Text("Хруст: ${"%.2f".format(crackleIntensity)}", style = MaterialTheme.typography.bodySmall)
-                Slider(
+                LabeledSlider(
+                    label = "Хруст",
                     value = crackleIntensity,
-                    onValueChange = { 
+                    range = 0f..1f,
+                    onValueChange = {
                         crackleIntensity = it
                         effectsManager.vintageNoise.crackleIntensity = it
-                    },
-                    valueRange = 0f..1f
+                    }
                 )
             }
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
         }
 
         IconButton(
@@ -943,7 +1259,347 @@ fun EffectsMenu(
                 .align(Alignment.BottomStart)
                 .padding(16.dp)
         ) {
-            Icon(Icons.Default.ArrowBack, "Back", tint = Color(0xFF556B55))
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                "Назад",
+                tint = palette.textSecondary
+            )
+        }
+    }
+}
+
+@Composable
+private fun EffectCard(
+    enabled: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val palette = LocalPlayerPalette.current
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = palette.surface)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp)
+                .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun EffectHeader(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val palette = LocalPlayerPalette.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = palette.text
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textSecondary
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                            checkedTrackColor = palette.wheelIcon,
+                            checkedThumbColor = palette.centerIcon,
+                            uncheckedThumbColor = palette.textSecondary,
+                            uncheckedTrackColor = palette.progressTrack
+            )
+        )
+    }
+}
+
+@Composable
+private fun LabeledSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onValueChange: (Float) -> Unit
+) {
+    val palette = LocalPlayerPalette.current
+    Text(
+        "$label: ${"%.2f".format(value)}",
+        style = MaterialTheme.typography.bodySmall,
+        color = palette.textSecondary
+    )
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        valueRange = range,
+        colors = SliderDefaults.colors(
+            thumbColor = palette.wheelIcon,
+            activeTrackColor = palette.progressActive,
+            inactiveTrackColor = palette.progressTrack
+        )
+    )
+}
+
+
+// =============== Настройки ===============
+
+@Composable
+fun SettingsScreen(
+    darkTheme: Boolean,
+    onToggleTheme: () -> Unit,
+    screensaverEnabled: Boolean,
+    onToggleScreensaver: (Boolean) -> Unit,
+    onBack: () -> Unit
+) {
+    val palette = LocalPlayerPalette.current
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.background)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+                .padding(bottom = 72.dp)
+        ) {
+            Text(
+                text = "Настройки",
+                style = MaterialTheme.typography.headlineMedium,
+                color = palette.text,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = palette.surface)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (darkTheme) "Тёмная тема" else "Светлая тема",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = palette.text
+                            )
+                            Text(
+                                text = "Оформление интерфейса приложения",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = palette.textSecondary
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.LightMode,
+                                null,
+                                tint = if (!darkTheme) palette.wheelIcon else palette.textSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Switch(
+                                checked = darkTheme,
+                                onCheckedChange = { onToggleTheme() },
+                                colors = SwitchDefaults.colors(
+                            checkedTrackColor = palette.wheelIcon,
+                            checkedThumbColor = palette.centerIcon,
+                            uncheckedThumbColor = palette.textSecondary,
+                            uncheckedTrackColor = palette.progressTrack
+                                )
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Icon(
+                                Icons.Default.DarkMode,
+                                null,
+                                tint = if (darkTheme) palette.wheelIcon else palette.textSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = palette.surface)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Скринсейвер",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = palette.text
+                            )
+                            Text(
+                                text = "Винил появляется при воспроизведении музыки после 10 секунд бездействия",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = palette.textSecondary
+                            )
+                        }
+                        Switch(
+                            checked = screensaverEnabled,
+                            onCheckedChange = onToggleScreensaver,
+                            colors = SwitchDefaults.colors(
+                            checkedTrackColor = palette.wheelIcon,
+                            checkedThumbColor = palette.centerIcon,
+                            uncheckedThumbColor = palette.textSecondary,
+                            uncheckedTrackColor = palette.progressTrack
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(16.dp)
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                "Назад",
+                tint = palette.textSecondary
+            )
+        }
+    }
+}
+
+// =============== Скринсейвер с винилом ===============
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun VinylScreensaver(
+    track: AudioTrack?,
+    isPlaying: Boolean,
+    onExit: () -> Unit
+) {
+    val palette = LocalPlayerPalette.current
+    val rotation = remember { Animatable(0f) }
+
+    LaunchedEffect(isPlaying) {
+        while (true) {
+            if (isPlaying) {
+                rotation.animateTo(
+                    rotation.value + 360f,
+                    animationSpec = tween(2700, easing = LinearEasing)
+                )
+            } else {
+                delay(200)
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF161616))
+            .clickable { onExit() },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .size(320.dp)
+                    .graphicsLayer { rotationZ = rotation.value }
+            ) {
+                val r = min(size.width, size.height) / 2f
+
+                // Тело виниловой пластинки
+                drawCircle(color = Color(0xFF0D0D0D), radius = r, center = center)
+                drawCircle(
+                    color = Color(0xFF2A2A2A),
+                    radius = r - 1.dp.toPx(),
+                    center = center,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+                )
+
+                // Дорожки
+                var groove = r * 0.92f
+                while (groove > r * 0.36f) {
+                    drawCircle(
+                        color = Color(0xFF1F1F1F),
+                        radius = groove,
+                        center = center,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 0.6.dp.toPx())
+                    )
+                    groove -= r * 0.035f
+                }
+
+                // Блик
+                drawArc(
+                    color = Color.White.copy(alpha = 0.07f),
+                    startAngle = 200f,
+                    sweepAngle = 60f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - r, center.y - r),
+                    size = androidx.compose.ui.geometry.Size(r * 2, r * 2),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = r * 0.5f)
+                )
+
+                // этикетка
+                drawCircle(color = Color(0xFFB0A08A), radius = r * 0.3f, center = center)
+                drawCircle(color = Color(0xFF8A7A64), radius = r * 0.3f, center = center,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()))
+                drawCircle(color = Color(0xFF161616), radius = r * 0.03f, center = center)
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Box(
+                modifier = Modifier
+                    .background(Color(0xFF2A2A2A), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = if (track != null) "${track.title} - ${track.artist}" else "CirclePlayer",
+                    color = Color(0xFFCFCFCF),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "Тапните, чтобы вернуться",
+                color = Color(0xFF6E6E6E),
+                fontSize = 12.sp
+            )
         }
     }
 }

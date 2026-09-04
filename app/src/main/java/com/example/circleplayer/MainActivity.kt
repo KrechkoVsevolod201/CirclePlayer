@@ -14,7 +14,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,6 +23,7 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.circleplayer.audio.EffectsManager
+import com.example.circleplayer.ui.theme.CirclePlayerTheme
 import java.io.File
 
 @UnstableApi
@@ -33,6 +33,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var effectsManager: EffectsManager
 
     private var selectedFolderPath by mutableStateOf<String?>(null)
+    private var darkTheme by mutableStateOf(true)
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -92,10 +93,7 @@ class MainActivity : ComponentActivity() {
                     File(Environment.getExternalStorageDirectory(), relativePath).absolutePath
                 }
                 docId.startsWith("raw:") -> docId.substringAfter("raw:")
-                else -> {
-                    // Fallback: try DATA column via DocumentsContract
-                    null
-                }
+                else -> null
             }
         } catch (_: Exception) {
             null
@@ -105,23 +103,29 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        darkTheme = prefs.getBoolean("dark_theme", true)
+        selectedFolderPath = prefs.getString("selected_music_folder_path", null)
+
         effectsManager = EffectsManager()
         exoPlayer = ExoPlayer.Builder(this).build()
 
         requestPermissionIfNeeded()
         requestNotificationPermissionIfNeeded()
 
-        selectedFolderPath = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-            .getString("selected_music_folder_path", null)
-
         setContent {
-            MaterialTheme {
+            CirclePlayerTheme(darkTheme = darkTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     MusicPlayerApp(
                         initialExoPlayer = exoPlayer,
                         effectsManager = effectsManager,
                         initialFolderPath = selectedFolderPath,
-                        onFolderSelect = { folderPicker.launch(null) }
+                        onFolderSelect = { folderPicker.launch(null) },
+                        darkTheme = darkTheme,
+                        onToggleTheme = {
+                            darkTheme = !darkTheme
+                            prefs.edit().putBoolean("dark_theme", darkTheme).apply()
+                        }
                     )
                 }
             }
