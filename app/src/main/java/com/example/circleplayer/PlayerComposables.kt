@@ -537,9 +537,10 @@ fun NowPlayingScreen(
             }
         }
 
-            // Экран: блок списка треков + блок активного трека с перемоткой
+        if (isLandscape) {
+            // Ландшафт: единый блок экрана (как в 1.2)
             UprightContainer(
-                upright = isLandscape,
+                upright = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(2f)
@@ -592,7 +593,7 @@ fun NowPlayingScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Блок активного трека: название, перемотка, прогресс
+                    // Блок активного трека
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -690,6 +691,146 @@ fun NowPlayingScreen(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+        } else {
+            // Портрет: раздельная структура (как в 1.1)
+            // Область диска / выбор трека колесом
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1.4f)
+                    .background(
+                        if (listMode) palette.surface else palette.discPanel,
+                        RoundedCornerShape(10.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (listMode) {
+                    val panelListState = rememberLazyListState()
+
+                    LaunchedEffect(selectedIndex, tracks) {
+                        if (listMode && selectedIndex in tracks.indices) {
+                            val viewportHeight = panelListState.layoutInfo.viewportEndOffset -
+                                panelListState.layoutInfo.viewportStartOffset
+                            val offset = -(viewportHeight / 2 - 60).coerceAtLeast(0)
+                            panelListState.animateScrollToItem(selectedIndex, offset)
+                        }
+                    }
+
+                    LazyColumn(
+                        state = panelListState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp)
+                    ) {
+                        itemsIndexed(tracks, key = { index, t -> "${t.uri}_$index" }) { index, track ->
+                            TrackRow(
+                                track = track,
+                                isSelected = index == selectedIndex,
+                                onClick = { onTrackPlay(index) }
+                            )
+                        }
+                    }
+                } else {
+                    DiscArt(isPlaying = isPlaying)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Marquee-строка с названием
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onToggleShuffle) {
+                    Icon(
+                        Icons.Default.Shuffle,
+                        "Перемешивание",
+                        tint = if (shuffleEnabled) palette.wheelIcon else palette.textSecondary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(palette.chipBackground, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val label = if (track != null) {
+                        "${track.title} - ${track.artist}"
+                    } else {
+                        "Нет треков"
+                    }
+                    Text(
+                        text = label,
+                        color = palette.chipText,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                        modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                    )
+                }
+
+                IconButton(onClick = onCycleRepeat) {
+                    Icon(
+                        if (repeatMode == 2) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                        "Повтор",
+                        tint = if (repeatMode > 0) palette.wheelIcon else palette.textSecondary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Прогресс
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Slider(
+                    value = if (isDraggingSlider) dragProgress else progress,
+                    onValueChange = {
+                        isDraggingSlider = true
+                        dragProgress = it
+                    },
+                    onValueChangeFinished = {
+                        if (duration > 0) {
+                            currentPlayer.seekTo((dragProgress * duration).toLong())
+                            currentPosition = (dragProgress * duration).toLong()
+                        }
+                        isDraggingSlider = false
+                    },
+                    enabled = duration > 0,
+                    colors = SliderDefaults.colors(
+                        thumbColor = palette.wheelIcon,
+                        activeTrackColor = palette.progressActive,
+                        inactiveTrackColor = palette.progressTrack
+                    )
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        formatTime(currentPosition),
+                        color = palette.text,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        formatTime(duration),
+                        color = palette.text,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
 
         // Колесо управления
         Box(
