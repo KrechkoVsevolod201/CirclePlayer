@@ -3,6 +3,7 @@ package com.example.circleplayer
 import android.content.ContentUris
 import android.content.Context
 import android.provider.MediaStore
+import java.io.File
 
 object MusicRepository {
     fun getAudioTracks(context: Context, folderPath: String? = null): List<AudioTrack> {
@@ -12,7 +13,8 @@ object MusicRepository {
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.DATA
+            MediaStore.Audio.Media.DATA,
+            MediaStore.Audio.Media.ALBUM_ID
         )
 
         val selectionParts = mutableListOf<String>()
@@ -43,6 +45,7 @@ object MusicRepository {
                 val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
                 val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
                 val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
 
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idCol)
@@ -50,13 +53,20 @@ object MusicRepository {
                         MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                         id
                     )
+                    val albumId = cursor.getLong(albumIdCol)
+                    val albumArtUri = if (albumId > 0L) {
+                        "content://media/external/audio/albumart/$albumId"
+                    } else {
+                        null
+                    }
                     tracks.add(
                         AudioTrack(
                             id = id,
                             title = cursor.getString(titleCol) ?: "Unknown",
                             artist = cursor.getString(artistCol) ?: "Unknown",
                             uri = uri.toString(),
-                            duration = cursor.getLong(durationCol)
+                            duration = cursor.getLong(durationCol),
+                            albumArtUri = albumArtUri
                         )
                     )
                 }
@@ -66,5 +76,39 @@ object MusicRepository {
         }
 
         return tracks
+    }
+
+    fun getAudioFolders(context: Context): List<AudioFolder> {
+        val folderCounts = linkedMapOf<String, Int>()
+        val projection = arrayOf(MediaStore.Audio.Media.DATA)
+        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND " +
+            "${MediaStore.Audio.Media.DURATION} > 0"
+
+        try {
+            context.contentResolver.query(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                null,
+                "${MediaStore.Audio.Media.DATA} COLLATE NOCASE ASC"
+            )?.use { cursor ->
+                val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+                while (cursor.moveToNext()) {
+                    val filePath = cursor.getString(dataColumn) ?: continue
+                    val folderPath = File(filePath).parentFile?.absolutePath ?: continue
+                    folderCounts[folderPath] = (folderCounts[folderPath] ?: 0) + 1
+                }
+            }
+        } catch (_: Exception) {
+            // An empty directory list is shown when the media query is unavailable.
+        }
+
+        return folderCounts.map { (path, count) ->
+            AudioFolder(
+                path = path,
+                name = File(path).name.ifBlank { path },
+                trackCount = count
+            )
+        }.sortedBy { it.name.lowercase() }
     }
 }
