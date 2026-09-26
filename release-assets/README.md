@@ -1,10 +1,15 @@
-# CirclePlayer v1.6 build artifact
+# CirclePlayer v1.6 release artifacts
 
-`CirclePlayer-v1.6-unsigned.apk` is the release variant built from tag `v1.6`
-(versionCode 7, target API 36).
+Artifacts are built from tag `v1.6` (versionCode 7, target API 36) and signed
+with the release key.
 
-This APK is **unsigned** and is not directly installable. SHA-256:
-`e13b0517badfedcd8ec8a85ea274ffdf6f19bb68255ad949a10a17def2d08841`
+- `CirclePlayer-v1.6.apk` — signed release APK for direct installation.
+- `CirclePlayer-v1.6.aab` — signed Android App Bundle for Google Play.
 
-For a distributable APK/AAB, configure the owner's release keystore as described
-in `docs/STORE_RELEASE.md` and rebuild the release artifacts.
+Signing certificate SHA-256:
+`51154b3410bbbd6ec7814d56e5969f666920414c3a3b725bff6a190b5cda338b`
+
+SHA-256 checksums:
+
+- APK: `d162ec20503e6188ba3c95f3056ed60dddfa0703fe43ed5af5b1f8c07a5100fb`
+- AAB: `a48ac0fafe403fa966b311593ef0d7fa575716943a20c8e012f2c82a60c6db92`

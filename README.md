@@ -44,8 +44,8 @@
 
 ## Опубликованные сборки
 
-- Последний опубликованный APK: [CirclePlayer v1.5](https://github.com/KrechkoVsevolod201/CirclePlayer/releases/latest).
-- Подготовка v1.6 к публикации в магазинах: [docs/STORE_RELEASE.md](docs/STORE_RELEASE.md).
+- CirclePlayer v1.6: [подписанный APK](https://github.com/KrechkoVsevolod201/CirclePlayer/raw/refs/heads/master/release-assets/CirclePlayer-v1.6.apk) · [AAB для Google Play](https://github.com/KrechkoVsevolod201/CirclePlayer/raw/refs/heads/master/release-assets/CirclePlayer-v1.6.aab).
+- Материалы и инструкции публикации: [docs/STORE_RELEASE.md](docs/STORE_RELEASE.md).
 
 > Минимальный Android: 7.1 (API 25)
 
