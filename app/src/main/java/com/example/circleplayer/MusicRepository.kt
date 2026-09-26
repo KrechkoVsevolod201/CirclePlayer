@@ -2,6 +2,7 @@ package com.example.circleplayer
 
 import android.content.ContentUris
 import android.content.Context
+import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
 
@@ -13,7 +14,6 @@ object MusicRepository {
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.DATA,
             MediaStore.Audio.Media.ALBUM_ID
         )
 
@@ -110,5 +110,60 @@ object MusicRepository {
                 trackCount = count
             )
         }.sortedBy { it.name.lowercase() }
+    }
+
+    fun getAudioFolderRoot(folders: List<AudioFolder>): String {
+        val primaryStorage = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
+        val allInPrimaryStorage = folders.all { folder ->
+            folder.path == primaryStorage || folder.path.startsWith("$primaryStorage/")
+        }
+        return if (allInPrimaryStorage) primaryStorage else File.separator
+    }
+
+    fun getImmediateAudioFolders(
+        folders: List<AudioFolder>,
+        parentPath: String
+    ): List<AudioFolder> {
+        val normalizedParent = parentPath.trimEnd('/').ifEmpty { File.separator }
+        val childCounts = linkedMapOf<String, Int>()
+
+        folders.forEach { folder ->
+            val relativePath = when {
+                normalizedParent == File.separator -> folder.path.removePrefix(File.separator)
+                folder.path == normalizedParent -> ""
+                folder.path.startsWith("$normalizedParent/") ->
+                    folder.path.removePrefix("$normalizedParent/")
+                else -> return@forEach
+            }
+            if (relativePath.isEmpty()) return@forEach
+
+            val childName = relativePath.substringBefore('/')
+            val childPath = if (normalizedParent == File.separator) {
+                "$normalizedParent$childName"
+            } else {
+                "$normalizedParent/$childName"
+            }
+            childCounts[childPath] = (childCounts[childPath] ?: 0) + folder.trackCount
+        }
+
+        return childCounts.map { (path, count) ->
+            AudioFolder(
+                path = path,
+                name = File(path).name.ifBlank { path },
+                trackCount = count
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    fun getAudioTrackCountInFolder(folders: List<AudioFolder>, folderPath: String): Int {
+        val normalizedPath = folderPath.trimEnd('/').ifEmpty { File.separator }
+        return folders.sumOf { folder ->
+            if (normalizedPath == File.separator || folder.path == normalizedPath ||
+                folder.path.startsWith("$normalizedPath/")) {
+                folder.trackCount
+            } else {
+                0
+            }
+        }
     }
 }

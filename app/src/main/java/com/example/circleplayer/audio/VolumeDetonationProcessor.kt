@@ -16,6 +16,9 @@ class VolumeDetonationProcessor : BaseAudioProcessor() {
     var enabled = false
 
     @Volatile
+    var effectsEnabled = false
+
+    @Volatile
     var amount = 0.3f
         set(value) {
             field = value.coerceIn(0f, 1f)
@@ -34,7 +37,7 @@ class VolumeDetonationProcessor : BaseAudioProcessor() {
 
         val output = replaceOutputBuffer(remaining)
 
-        if (!enabled || amount <= 0f) {
+        if (!enabled || !effectsEnabled || amount <= 0f) {
             output.put(inputBuffer)
             output.flip()
             return

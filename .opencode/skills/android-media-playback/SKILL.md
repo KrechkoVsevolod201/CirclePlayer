@@ -20,10 +20,11 @@ Use this skill for Media3 player behavior, background media sessions, audio proc
 ## CirclePlayer-specific facts
 
 - Media3 dependencies are pinned to `1.4.1` in `app/build.gradle.kts` (currently declared inline).
-- `MainActivity` creates an ExoPlayer and gives it to `MusicPlayerApp`; that Compose tree changes/replaces the player when effects are toggled and manages player listeners and release.
-- `service/PlaybackService.kt` creates its own ExoPlayer and MediaSession. It is declared in the manifest but is not currently connected to the Activity's player. Do not conflate those playback states.
-- `audio/EffectsRenderersFactory.kt` injects `EffectsManager.getAudioProcessors()` into a `DefaultAudioSink`.
+- `service/PlaybackService.kt` owns the authoritative ExoPlayer and MediaSession.
+- `MainActivity` connects with a `MediaController`, and `MusicPlayerApp` issues commands to that same service player. The controller is released with the Activity lifecycle; the service owns player release.
+- `audio/EffectsRenderersFactory.kt` injects the shared `EffectsManager.getAudioProcessors()` into the service player's `DefaultAudioSink`.
 - Four processors are in `audio/`: `WowFlutterProcessor`, `VolumeDetonationProcessor`, `ChorusProcessor`, and `VintageNoiseProcessor`. They expect PCM 16-bit and expose volatile enable/parameter values.
+- Effects are always installed on the service player; `EffectsManager.effectsEnabled` gates processing without replacing or disconnecting the MediaController.
 - The selected track list comes from `MusicRepository` as `content://` MediaStore URIs; preserve URI-based playback.
 - Manifest declares media playback foreground-service permissions and a notification permission requested on Android 13+.
 

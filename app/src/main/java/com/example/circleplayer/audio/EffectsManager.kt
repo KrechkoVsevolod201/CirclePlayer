@@ -11,6 +11,16 @@ class EffectsManager {
     val chorus = ChorusProcessor()
     val vintageNoise = VintageNoiseProcessor()
 
+    @Volatile
+    var effectsEnabled = false
+        set(value) {
+            field = value
+            wowFlutter.effectsEnabled = value
+            volumeDetonation.effectsEnabled = value
+            chorus.effectsEnabled = value
+            vintageNoise.effectsEnabled = value
+        }
+
     fun getAudioProcessors(): Array<AudioProcessor> {
         return arrayOf(
             wowFlutter,
@@ -18,5 +28,9 @@ class EffectsManager {
             chorus,
             vintageNoise
         )
+    }
+
+    companion object {
+        val shared: EffectsManager by lazy { EffectsManager() }
     }
 }

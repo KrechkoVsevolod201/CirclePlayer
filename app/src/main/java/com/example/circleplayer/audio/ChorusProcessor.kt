@@ -15,6 +15,9 @@ class ChorusProcessor : BaseAudioProcessor() {
     var enabled = false
 
     @Volatile
+    var effectsEnabled = false
+
+    @Volatile
     var depth = 0.5f
         set(value) {
             field = value.coerceIn(0f, 1f)
@@ -54,7 +57,7 @@ class ChorusProcessor : BaseAudioProcessor() {
 
         val output = replaceOutputBuffer(frameCount * frameSize)
 
-        if (!enabled) {
+        if (!enabled || !effectsEnabled) {
             output.put(inputBuffer)
             output.flip()
             return
@@ -62,10 +65,13 @@ class ChorusProcessor : BaseAudioProcessor() {
 
         val maxDelay = (sampleRate * 0.025).toInt().coerceAtLeast(2)
         val capacityFrames = delayBuffer.size / channelCount
+        val currentRate = rate
+        val currentDepth = depth
+        val currentMix = mix
 
         for (frame in 0 until frameCount) {
             val time = position.toDouble() / sampleRate
-            val modulation = sin(2.0 * PI * rate * time) * depth
+            val modulation = sin(2.0 * PI * currentRate * time) * currentDepth
             val delayFrames = ((maxDelay / 2.0) * (1.0 + modulation))
                 .toInt()
                 .coerceIn(1, maxDelay - 1)
@@ -76,7 +82,7 @@ class ChorusProcessor : BaseAudioProcessor() {
 
                 val readFrame = (writePos / channelCount - delayFrames + capacityFrames) % capacityFrames
                 val delayed = delayBuffer[readFrame * channelCount + ch]
-                val mixed = sample * (1f - mix) + delayed * mix
+                val mixed = sample * (1f - currentMix) + delayed * currentMix
                 val out = (mixed * 32767f)
                     .toInt()
                     .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())

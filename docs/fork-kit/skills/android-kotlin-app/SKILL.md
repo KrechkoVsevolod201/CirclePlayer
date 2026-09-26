@@ -21,14 +21,14 @@ Use this skill for Android application features that involve platform APIs, app 
 
 - Single module `:app`; Kotlin package/application ID `com.example.circleplayer`.
 - `minSdk 25`, `targetSdk 35`, Compose UI, Media3 `1.4.1`.
-- `MainActivity` owns permission prompts, folder-picker callback, preferences for theme/folder, and connects to the service through a MediaController.
-- `PlaybackService` owns the authoritative ExoPlayer and MediaSession used by both Compose UI and Android system media controls.
+- `MainActivity` owns permission prompts, folder-picker callback, preferences and connects to the service through a MediaController.
+- `PlaybackService` owns the authoritative ExoPlayer and MediaSession used by Compose UI and Android media controls.
 - `MusicRepository` queries MediaStore and currently depends on the `DATA` filesystem path when filtering a chosen folder. Do not assume SAF grants a usable raw path on all providers/devices.
 - A subset of configuration changes is handled in `AndroidManifest.xml`; validate orientation changes on the actual flow.
 
 ## Quality checks
 
 - Preserve saved state and resource cleanup across Activity recreation and process/lifecycle transitions.
-- Consider API 25 through current target SDK behavior for permissions, notifications, storage, and services.
-- Check error, denied-permission, no-data, and interrupted-operation paths.
+- Consider API 25 through current target SDK behavior for permissions, notifications, storage and services.
+- Check error, denied-permission, no-data and interrupted-operation paths.
 - Review `git diff` to ensure only intended source/configuration files changed.

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">CirclePlayer</string>
+    <string name="playback_notification_channel">Music playback</string>
+</resources>

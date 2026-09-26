@@ -15,6 +15,9 @@ class WowFlutterProcessor : BaseAudioProcessor() {
     var enabled = false
 
     @Volatile
+    var effectsEnabled = false
+
+    @Volatile
     var depth = 0.5f
         set(value) {
             field = value.coerceIn(0f, 1f)
@@ -48,7 +51,7 @@ class WowFlutterProcessor : BaseAudioProcessor() {
 
         val output = replaceOutputBuffer(frameCount * frameSize)
 
-        if (!enabled) {
+        if (!enabled || !effectsEnabled) {
             for (i in 0 until frameCount * channelCount) {
                 val sample = inputBuffer.short
                 delayLine[writePos] = sample
@@ -62,10 +65,12 @@ class WowFlutterProcessor : BaseAudioProcessor() {
 
         val maxDelayFrames = (sampleRate * 0.015).toInt().coerceAtLeast(1)
         val delayCapacityFrames = delayLine.size / channelCount
+        val currentRate = rate
+        val currentDepth = depth
 
         for (frame in 0 until frameCount) {
             val time = position.toDouble() / sampleRate
-            val modulation = sin(2.0 * PI * rate * time) * depth
+            val modulation = sin(2.0 * PI * currentRate * time) * currentDepth
             val delayFrames = ((maxDelayFrames / 2.0) * (1.0 + modulation))
                 .toInt()
                 .coerceIn(1, maxDelayFrames)
