@@ -9,11 +9,24 @@ store before creating the permanent app records.
 Never publish an APK/AAB signed with Android's debug key. Create a private
 upload/release keystore and keep both it and its passwords outside Git:
 
-1. Copy `keystore.properties.example` to the ignored `keystore.properties`.
-2. Set `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`, or provide
+1. Create a long-lived RSA key. `keytool` prompts for passwords interactively;
+   keep them in a password manager and make an offline backup of the keystore:
+
+   ```bash
+   keytool -genkeypair -v \
+     -keystore "$HOME/.android/circleplayer-release.jks" \
+     -alias circleplayer -keyalg RSA -keysize 4096 -validity 10000
+   ```
+
+2. Copy `keystore.properties.example` to the ignored `keystore.properties`.
+3. Set `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`, or provide
    the equivalent `RELEASE_STORE_FILE`, `RELEASE_STORE_PASSWORD`,
    `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD` environment variables.
-3. Build `./gradlew :app:bundleRelease :app:assembleRelease`.
+4. Build `./gradlew :app:bundleRelease :app:assembleRelease`.
+
+The published v1.5 APK is signed by the local Android debug key. Switching to a
+new release key means Android will require users with v1.5 installed to
+uninstall it before installing this v1.6 build.
 
 Without all four signing values, Gradle intentionally creates unsigned release
 artifacts. Use the same signing identity for APK distribution across stores so
