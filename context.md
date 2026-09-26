@@ -10,9 +10,9 @@ CirclePlayer — Android-приложение для воспроизведен�
 - Android Gradle Plugin `8.13.0`, Kotlin `2.0.21`, Gradle wrapper `8.13`.
 - Jetpack Compose: Compose BOM `2024.09.00`, Material 3.
 - AndroidX Media3 / ExoPlayer `1.4.1` (ExoPlayer, UI и session).
-- `compileSdk = 35`, `targetSdk = 35`, `minSdk = 25` (Android 7.1); Java/Kotlin target 11.
+- `compileSdk = 36`, `targetSdk = 36`, `minSdk = 25` (Android 7.1); Java/Kotlin target 11.
 - Namespace и application ID: `com.example.circleplayer`.
-- Версия из `app/build.gradle.kts`: `versionName = "1.5"`, `versionCode = 6`. README должен соответствовать версии Gradle.
+- Версия из `app/build.gradle.kts`: `versionName = "1.6"`, `versionCode = 7`. README должен соответствовать версии Gradle.
 - Единственный Gradle-модуль: `:app`.
 
 ## Структура приложения
@@ -29,7 +29,7 @@ CirclePlayer — Android-приложение для воспроизведен�
 
 ## Поведение и доменные детали
 
-- Click Wheel: верхняя кнопка Menu, нижняя Play/Pause, центр подтверждает выбор, боковые кнопки переключают треки. Списки треков и папок управляются кольцевым жестом; курсор списка не меняет активный трек до Play/Pause. Вибрация и системный click sound настраиваются отдельно.
+- Click Wheel: верхняя кнопка Menu, нижняя Play/Pause, центр подтверждает выбор, боковые кнопки переключают треки. Списки треков и папок управляются кольцевым жестом; курсор списка не меняет активный трек до Play/Pause. Вибрация включается настройкой и срабатывает на кнопки и шаги прокрутки; звук прокрутки настраивается отдельно.
 - Списки треков и папок показываются на мини-дисплее. Каталоги доступны иерархически; Menu поднимается на папку выше. Системный выбор через `OpenDocumentTree` остаётся доступен.
 - Выбранная папка фильтрует медиатеку; системный выбор URI пытается сохранить разрешение, локальный путь и прочие настройки записываются в `SharedPreferences` (`app_prefs`). Тема, скринсейвер, режим пасхалок и отклики Click Wheel хранятся там же.
 - Если у трека доступна обложка, её `content://` URI используется как текстура винила в плеере и скринсейвере.
@@ -61,7 +61,7 @@ CirclePlayer — Android-приложение для воспроизведен�
 ./gradlew connectedAndroidTest
 ```
 
-Release-сборка сейчас подписывается debug signing config — это подходит для текущего локального APK, но не является конфигурацией публикации. В репозитории есть базовые шаблонные тесты: `ExampleUnitTest` проверяет сложение, `ExampleInstrumentedTest` — package name; значимого покрытия логики плеера пока нет. Скриншоты расположены в `screenshots/`; APK присутствуют в `app/`.
+Release-сборка подписывается ключом из `keystore.properties` или переменных `RELEASE_*`; без него получается неподписанный артефакт. Не добавлять keystore и пароли в Git. Store listing находится в `fastlane/metadata/android/`, store checklist — `docs/STORE_RELEASE.md`, скриншоты — `screenshots/`. В репозитории есть базовые шаблонные тесты: `ExampleUnitTest` проверяет сложение, `ExampleInstrumentedTest` — package name; значимого покрытия логики плеера пока нет.
 
 ## Рекомендации для изменений
 

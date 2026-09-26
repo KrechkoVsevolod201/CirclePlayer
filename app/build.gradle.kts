@@ -1,23 +1,61 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
+val releaseSigningProperties = Properties().apply {
+    val propertiesFile = rootProject.file("keystore.properties")
+    if (propertiesFile.exists()) {
+        propertiesFile.inputStream().use(::load)
+    }
+}
+
+fun releaseSigningValue(property: String, environmentVariable: String): String? =
+    releaseSigningProperties.getProperty(property)?.takeIf(String::isNotBlank)
+        ?: providers.environmentVariable(environmentVariable).orNull?.takeIf(String::isNotBlank)
+
+val releaseStoreFile = releaseSigningValue("storeFile", "RELEASE_STORE_FILE")
+val releaseStorePassword = releaseSigningValue("storePassword", "RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = releaseSigningValue("keyAlias", "RELEASE_KEY_ALIAS")
+val releaseKeyPassword = releaseSigningValue("keyPassword", "RELEASE_KEY_PASSWORD")
+val releaseSigningValues = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+)
+val hasReleaseSigning = releaseSigningValues.all { !it.isNullOrBlank() }
+check(releaseSigningValues.none { !it.isNullOrBlank() } || hasReleaseSigning) {
+    "Configure all four release signing values or leave all of them empty."
+}
+
 android {
     namespace = "com.example.circleplayer"
-    compileSdk = 35// или 35, но 36 ещё не выпущен официально (на октябрь 2025)
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.circleplayer"
         minSdk = 25
-        targetSdk = 35
-        versionCode = 6
-        versionName = "1.5"
+        targetSdk = 36
+        versionCode = 7
+        versionName = "1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(requireNotNull(releaseStoreFile))
+                storePassword = requireNotNull(releaseStorePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releaseKeyPassword)
+            }
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -25,7 +63,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                null
+            }
         }
     }
     compileOptions {

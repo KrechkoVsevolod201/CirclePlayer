@@ -3,6 +3,7 @@ package com.example.circleplayer
 import android.annotation.SuppressLint
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
+import android.util.LruCache
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.SoundPool
@@ -11,12 +12,22 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import java.io.File
 import androidx.compose.foundation.*
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -56,6 +67,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.luminance
@@ -101,11 +113,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.ArrayDeque
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 // =============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===============
 
@@ -216,33 +230,50 @@ private fun extractTrackBpm(metadata: Metadata): Float? {
     return null
 }
 
+private object AlbumArtworkCache {
+    private val cache = object : LruCache<String, ImageBitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: ImageBitmap): Int =
+            (value.width * value.height * 4).coerceAtLeast(1)
+    }
+
+    fun get(uri: String): ImageBitmap? = cache.get(uri)
+
+    fun put(uri: String, artwork: ImageBitmap) {
+        cache.put(uri, artwork)
+    }
+}
+
 @Composable
 private fun rememberAlbumArtwork(artworkUri: String?): ImageBitmap? {
     val context = LocalContext.current.applicationContext
     val artwork by produceState<ImageBitmap?>(initialValue = null, key1 = artworkUri) {
         value = artworkUri?.let { uri ->
             withContext(Dispatchers.IO) {
-                runCatching {
-                    val parsedUri = Uri.parse(uri)
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    context.contentResolver.openInputStream(parsedUri)?.use {
-                        BitmapFactory.decodeStream(it, null, bounds)
-                    }
-                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-                        return@runCatching null
-                    }
+                AlbumArtworkCache.get(uri) ?: run {
+                    runCatching {
+                        val parsedUri = Uri.parse(uri)
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        context.contentResolver.openInputStream(parsedUri)?.use {
+                            BitmapFactory.decodeStream(it, null, bounds)
+                        }
+                        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                            return@runCatching null
+                        }
 
-                    var sampleSize = 1
-                    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 512) {
-                        sampleSize *= 2
+                        var sampleSize = 1
+                        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 512) {
+                            sampleSize *= 2
+                        }
+                        val options = BitmapFactory.Options().apply {
+                            inSampleSize = sampleSize
+                        }
+                        context.contentResolver.openInputStream(parsedUri)?.use {
+                            BitmapFactory.decodeStream(it, null, options)?.asImageBitmap()
+                        }
+                    }.getOrNull()?.also { decodedArtwork ->
+                        AlbumArtworkCache.put(uri, decodedArtwork)
                     }
-                    val options = BitmapFactory.Options().apply {
-                        inSampleSize = sampleSize
-                    }
-                    context.contentResolver.openInputStream(parsedUri)?.use {
-                        BitmapFactory.decodeStream(it, null, options)?.asImageBitmap()
-                    }
-                }.getOrNull()
+                }
             }
         }
     }
@@ -273,6 +304,8 @@ fun MusicPlayerApp(
     var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     var playingTrackIndex by remember { mutableIntStateOf(-1) }
     var selectedDirectoryIndex by rememberSaveable { mutableIntStateOf(0) }
+    var selectionAnimationDurationMs by remember { mutableIntStateOf(200) }
+    var lastWheelScrollAt by remember { mutableLongStateOf(0L) }
 
     var tracks by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
     var isPlaying by remember(initialPlayer) { mutableStateOf(initialPlayer.isPlaying) }
@@ -532,11 +565,31 @@ fun MusicPlayerApp(
         onDispose { currentPlayer.removeListener(listener) }
     }
 
+    fun updateSelectionAnimationSpeed(stepCount: Int) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (lastWheelScrollAt > 0L) {
+            val elapsedMs = (now - lastWheelScrollAt).coerceAtLeast(1L)
+            val steps = kotlin.math.abs(stepCount).coerceAtLeast(1)
+            val millisPerStep = elapsedMs.toFloat() / steps
+            selectionAnimationDurationMs = if (millisPerStep >= 60_000f / 85f) {
+                (millisPerStep * 0.35f).toInt().coerceIn(220, 420)
+            } else {
+                0
+            }
+        }
+        lastWheelScrollAt = now
+    }
+
     fun handleScroll(stepCount: Int) {
         if (showDirectoryBrowser) {
             if (isLoadingFolders) return
-            selectedDirectoryIndex =
+            val newIndex =
                 (selectedDirectoryIndex + stepCount).coerceIn(0, currentDirectoryFolders.size + 1)
+            val actualStepCount = newIndex - selectedDirectoryIndex
+            if (actualStepCount != 0) {
+                updateSelectionAnimationSpeed(actualStepCount)
+                selectedDirectoryIndex = newIndex
+            }
             return
         }
 
@@ -544,6 +597,7 @@ fun MusicPlayerApp(
 
         val newIndex = (selectedIndex + stepCount).coerceIn(0, tracks.size - 1)
         if (newIndex != selectedIndex) {
+            updateSelectionAnimationSpeed(newIndex - selectedIndex)
             selectedIndex = newIndex
         }
     }
@@ -636,11 +690,18 @@ fun MusicPlayerApp(
         selectedDirectoryIndex = 0
     }
 
+    fun leaveTrackList() {
+        if (playingTrackIndex in tracks.indices) {
+            selectedIndex = playingTrackIndex
+        }
+        listMode = false
+    }
+
     fun handleWheelConfirm() {
         if (showDirectoryBrowser) {
             handleDirectoryConfirm()
         } else if (listMode) {
-            listMode = false
+            leaveTrackList()
         }
     }
 
@@ -655,7 +716,7 @@ fun MusicPlayerApp(
             showSettings -> showSettings = false
             showEffectsMenu -> showEffectsMenu = false
             showDirectoryBrowser -> navigateDirectoryBack()
-            listMode -> listMode = false
+            listMode -> leaveTrackList()
             else -> {
                 backPressedCallback?.isEnabled = false
                 backPressedDispatcher?.onBackPressed()
@@ -671,7 +732,7 @@ fun MusicPlayerApp(
             showSettings -> showSettings = false
             showEffectsMenu -> showEffectsMenu = false
             showDirectoryBrowser -> navigateDirectoryBack()
-            listMode -> listMode = false
+            listMode -> leaveTrackList()
             else -> listMode = true
         }
     }
@@ -708,7 +769,7 @@ fun MusicPlayerApp(
             showVinyl -> showVinyl = false
             showDirectoryBrowser -> showDirectoryBrowser = false
             listMode -> {
-                listMode = false
+                leaveTrackList()
                 if (screensaverEnabled) showVinyl = true
             }
             else -> listMode = true
@@ -744,7 +805,15 @@ fun MusicPlayerApp(
                 }
             }
     ) {
-        Crossfade(targetState = activePage, label = "player-page") { page ->
+        AnimatedContent(
+            targetState = activePage,
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = {
+                (fadeIn(tween(280)) + slideInVertically(tween(280)) { it / 20 }) togetherWith
+                    (fadeOut(tween(220)) + slideOutVertically(tween(220)) { -it / 28 })
+            },
+            label = "player-page"
+        ) { page ->
         when (page) {
             PlayerPage.EFFECTS -> EffectsMenu(
                 effectsManager = effectsManager,
@@ -890,6 +959,7 @@ fun MusicPlayerApp(
                 shuffleEnabled = shuffleEnabled,
                 repeatMode = repeatMode,
                 listMode = listMode,
+                selectionAnimationDurationMs = selectionAnimationDurationMs,
                 wheelVibrationEnabled = wheelVibrationEnabled,
                 wheelClickSoundEnabled = wheelClickSoundEnabled,
                 wheelClickSoundUri = wheelClickSoundUri,
@@ -903,6 +973,8 @@ fun MusicPlayerApp(
                 onConfirm = { handleWheelConfirm() },
                 onToggleShuffle = { shuffleEnabled = !shuffleEnabled },
                 onTrackPlay = { index ->
+                    selectionAnimationDurationMs = 280
+                    lastWheelScrollAt = 0L
                     selectedIndex = index
                 },
                 onPreviousTrack = { handleTrackSkip(-1) },
@@ -915,13 +987,22 @@ fun MusicPlayerApp(
                     showDirectoryBrowser = true
                     listMode = true
                 },
-                onDirectorySelectionIndexChange = { selectedDirectoryIndex = it },
+                onDirectorySelectionIndexChange = {
+                    selectionAnimationDurationMs = 280
+                    lastWheelScrollAt = 0L
+                    selectedDirectoryIndex = it
+                },
                 easterEggsEnabled = easterEggsEnabled
             )
         }
         }
 
-        if (showVinyl) {
+        AnimatedVisibility(
+            visible = showVinyl,
+            enter = fadeIn(tween(320)) + scaleIn(initialScale = 0.96f, animationSpec = tween(320)),
+            exit = fadeOut(tween(240)) + scaleOut(targetScale = 0.98f, animationSpec = tween(240)),
+            label = "vinyl-screensaver"
+        ) {
             VinylScreensaver(
                 track = tracks.getOrNull(playingTrackIndex)
                     ?: tracks.getOrNull(selectedIndex),
@@ -963,6 +1044,7 @@ fun NowPlayingScreen(
     shuffleEnabled: Boolean,
     repeatMode: Int,
     listMode: Boolean,
+    selectionAnimationDurationMs: Int,
     wheelVibrationEnabled: Boolean,
     wheelClickSoundEnabled: Boolean,
     wheelClickSoundUri: String?,
@@ -1033,36 +1115,47 @@ fun NowPlayingScreen(
                             .weight(1f),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (listMode) {
-                            if (directoryBrowserOpen) {
-                                DirectorySelectionPanel(
-                                    folders = folders,
-                                    isRoot = directoryBrowsePath == directoryRootPath,
-                                    currentFolderTrackCount = currentDirectoryTrackCount,
-                                    selectedIndex = selectedDirectoryIndex,
-                                    isLoading = isLoadingFolders,
-                                    landscape = true,
-                                    elementScale = scaleOf(PlayerScaleElement.TRACK_LIST),
-                                    onSelectionChange = onDirectorySelectionIndexChange
-                                )
+                        AnimatedContent(
+                            targetState = listMode,
+                            transitionSpec = {
+                                (fadeIn(tween(240)) + scaleIn(initialScale = 0.96f, animationSpec = tween(260))) togetherWith
+                                    (fadeOut(tween(190)) + scaleOut(targetScale = 0.98f, animationSpec = tween(190)))
+                            },
+                            label = "landscape-cover-list"
+                        ) { showingList ->
+                            if (showingList) {
+                                if (directoryBrowserOpen) {
+                                    DirectorySelectionPanel(
+                                        folders = folders,
+                                        isRoot = directoryBrowsePath == directoryRootPath,
+                                        currentFolderTrackCount = currentDirectoryTrackCount,
+                                        selectedIndex = selectedDirectoryIndex,
+                                        isLoading = isLoadingFolders,
+                                        landscape = true,
+                                        animationDurationMs = selectionAnimationDurationMs,
+                                        elementScale = scaleOf(PlayerScaleElement.TRACK_LIST),
+                                        onSelectionChange = onDirectorySelectionIndexChange
+                                    )
+                                } else {
+                                    TrackSelectionList(
+                                        tracks = tracks,
+                                        selectedIndex = selectedIndex,
+                                        onTrackPlay = onTrackPlay,
+                                        landscape = true,
+                                        animationDurationMs = selectionAnimationDurationMs,
+                                        elementScale = scaleOf(PlayerScaleElement.TRACK_LIST)
+                                    )
+                                }
                             } else {
-                                TrackSelectionList(
-                                    tracks = tracks,
-                                    selectedIndex = selectedIndex,
-                                    onTrackPlay = onTrackPlay,
-                                    landscape = true,
-                                    elementScale = scaleOf(PlayerScaleElement.TRACK_LIST)
+                                DiscArt(
+                                    isPlaying = isPlaying,
+                                    scratchEnabled = easterEggsEnabled,
+                                    artworkUri = track?.albumArtUri,
+                                    onScratch = onScratch,
+                                    rotationSpeed = vinylRotationSpeed,
+                                    elementScale = scaleOf(PlayerScaleElement.COVER)
                                 )
                             }
-                        } else {
-                            DiscArt(
-                                isPlaying = isPlaying,
-                                scratchEnabled = easterEggsEnabled,
-                                artworkUri = track?.albumArtUri,
-                                onScratch = onScratch,
-                                rotationSpeed = vinylRotationSpeed,
-                                elementScale = scaleOf(PlayerScaleElement.COVER)
-                            )
                         }
                     }
 
@@ -1097,36 +1190,47 @@ fun NowPlayingScreen(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                if (listMode) {
-                    if (directoryBrowserOpen) {
-                        DirectorySelectionPanel(
-                            folders = folders,
-                            isRoot = directoryBrowsePath == directoryRootPath,
-                            currentFolderTrackCount = currentDirectoryTrackCount,
-                            selectedIndex = selectedDirectoryIndex,
-                            isLoading = isLoadingFolders,
-                            landscape = false,
-                            elementScale = scaleOf(PlayerScaleElement.TRACK_LIST),
-                            onSelectionChange = onDirectorySelectionIndexChange
-                        )
+                AnimatedContent(
+                    targetState = listMode,
+                    transitionSpec = {
+                        (fadeIn(tween(240)) + scaleIn(initialScale = 0.96f, animationSpec = tween(260))) togetherWith
+                            (fadeOut(tween(190)) + scaleOut(targetScale = 0.98f, animationSpec = tween(190)))
+                    },
+                    label = "portrait-cover-list"
+                ) { showingList ->
+                    if (showingList) {
+                        if (directoryBrowserOpen) {
+                            DirectorySelectionPanel(
+                                folders = folders,
+                                isRoot = directoryBrowsePath == directoryRootPath,
+                                currentFolderTrackCount = currentDirectoryTrackCount,
+                                selectedIndex = selectedDirectoryIndex,
+                                isLoading = isLoadingFolders,
+                                landscape = false,
+                                animationDurationMs = selectionAnimationDurationMs,
+                                elementScale = scaleOf(PlayerScaleElement.TRACK_LIST),
+                                onSelectionChange = onDirectorySelectionIndexChange
+                            )
+                        } else {
+                            TrackSelectionList(
+                                tracks = tracks,
+                                selectedIndex = selectedIndex,
+                                onTrackPlay = onTrackPlay,
+                                landscape = false,
+                                animationDurationMs = selectionAnimationDurationMs,
+                                elementScale = scaleOf(PlayerScaleElement.TRACK_LIST)
+                            )
+                        }
                     } else {
-                        TrackSelectionList(
-                            tracks = tracks,
-                            selectedIndex = selectedIndex,
-                            onTrackPlay = onTrackPlay,
-                            landscape = false,
-                            elementScale = scaleOf(PlayerScaleElement.TRACK_LIST)
+                        DiscArt(
+                            isPlaying = isPlaying,
+                            scratchEnabled = easterEggsEnabled,
+                            artworkUri = track?.albumArtUri,
+                            onScratch = onScratch,
+                            rotationSpeed = vinylRotationSpeed,
+                            elementScale = scaleOf(PlayerScaleElement.COVER)
                         )
                     }
-                } else {
-                    DiscArt(
-                        isPlaying = isPlaying,
-                        scratchEnabled = easterEggsEnabled,
-                        artworkUri = track?.albumArtUri,
-                        onScratch = onScratch,
-                        rotationSpeed = vinylRotationSpeed,
-                        elementScale = scaleOf(PlayerScaleElement.COVER)
-                    )
                 }
             }
 
@@ -1218,6 +1322,7 @@ private fun LandscapeTrackInfo(
     onCycleRepeat: () -> Unit
 ) {
     val palette = LocalPlayerPalette.current
+    val trackLabel = track?.let { "${it.title} - ${it.artist}" } ?: localized("Нет треков", "No tracks")
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1244,19 +1349,27 @@ private fun LandscapeTrackInfo(
                 onClick = onToggleShuffle
             )
 
-            Text(
-                text = track?.let { "${it.title} - ${it.artist}" } ?: localized("Нет треков", "No tracks"),
-                color = palette.chipText,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Clip,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier
-                    .weight(1f)
-                    .basicMarquee(iterations = Int.MAX_VALUE)
-            )
+            AnimatedContent(
+                targetState = trackLabel,
+                modifier = Modifier.weight(1f),
+                transitionSpec = {
+                    (fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 4 }) togetherWith
+                        (fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 4 })
+                },
+                label = "landscape-track-label"
+            ) { label ->
+                Text(
+                    text = label,
+                    color = palette.chipText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                )
+            }
 
             PlayerToggleIconButton(
                 image = if (repeatMode == 2) Icons.Default.RepeatOne else Icons.Default.Repeat,
@@ -1295,6 +1408,7 @@ private fun PortraitTrackInfo(
     onCycleRepeat: () -> Unit
 ) {
     val palette = LocalPlayerPalette.current
+    val trackLabel = track?.let { "${it.title} - ${it.artist}" } ?: localized("Нет треков", "No tracks")
     val brightText = if (palette.text.luminance() >= palette.textSecondary.luminance()) {
         palette.text
     } else {
@@ -1329,16 +1443,25 @@ private fun PortraitTrackInfo(
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = track?.let { "${it.title} - ${it.artist}" } ?: localized("Нет треков", "No tracks"),
-                color = palette.chipText,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Clip,
-                modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
-            )
+            AnimatedContent(
+                targetState = trackLabel,
+                transitionSpec = {
+                    (fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 4 }) togetherWith
+                        (fadeOut(tween(160)) + slideOutVertically(tween(160)) { -it / 4 })
+                },
+                label = "portrait-track-label"
+            ) { label ->
+                Text(
+                    text = label,
+                    color = palette.chipText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                )
+            }
         }
 
         PlayerToggleIconButton(
@@ -1393,7 +1516,7 @@ private fun PlaybackProgress(
             val playerDuration = currentPlayer.duration.takeIf { it > 0 } ?: fallbackDuration
             if (currentPosition != playerPosition) currentPosition = playerPosition
             if (duration != playerDuration) duration = playerDuration
-            delay(if (isPlaying) 250 else 1_000)
+            delay(if (isPlaying) 100 else 1_000)
         }
     }
 
@@ -1404,7 +1527,7 @@ private fun PlaybackProgress(
     }
     val smoothProgress by animateFloatAsState(
         targetValue = progress,
-        animationSpec = tween(220, easing = FastOutSlowInEasing),
+        animationSpec = tween(140, easing = FastOutSlowInEasing),
         label = "playback-progress"
     )
 
@@ -1462,16 +1585,25 @@ private fun TrackSelectionList(
     selectedIndex: Int,
     onTrackPlay: (Int) -> Unit,
     landscape: Boolean,
+    animationDurationMs: Int,
     elementScale: Float = 1f
 ) {
     val palette = LocalPlayerPalette.current
     val listState = rememberLazyListState()
 
-    LaunchedEffect(selectedIndex, tracks) {
+    LaunchedEffect(selectedIndex, tracks, animationDurationMs) {
         if (selectedIndex in tracks.indices) {
             val viewportHeight = listState.layoutInfo.viewportEndOffset -
                 listState.layoutInfo.viewportStartOffset
             val offset = -(viewportHeight / 2 - 60).coerceAtLeast(0)
+            if (animationDurationMs == 0) {
+                val isSelectedItemVisible = listState.layoutInfo.visibleItemsInfo
+                    .any { it.index == selectedIndex }
+                if (!isSelectedItemVisible) {
+                    listState.scrollToItem(selectedIndex, offset)
+                }
+                return@LaunchedEffect
+            }
             listState.animateScrollToItem(selectedIndex, offset)
         }
     }
@@ -1500,6 +1632,7 @@ private fun TrackSelectionList(
             TrackRow(
                 track = track,
                 isSelected = index == selectedIndex,
+                animationDurationMs = animationDurationMs,
                 onClick = { onTrackPlay(index) }
             )
         }
@@ -1679,12 +1812,26 @@ private fun SideCircleButton(
     onClick: () -> Unit
 ) {
     val palette = LocalPlayerPalette.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.94f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 650f),
+        label = "side-button-press"
+    )
     Box(
         modifier = modifier
             .size(buttonSize)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .shadow(3.dp, CircleShape)
             .background(palette.sideButton, CircleShape)
-            .clickable { onClick() },
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current
+            ) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Icon(
@@ -1714,12 +1861,15 @@ private fun DiscArt(
 
     // Состояние для скретча
     var isScratching by remember { mutableStateOf(false) }
+    var isSettling by remember { mutableStateOf(false) }
     var lastAngle by remember { mutableFloatStateOf(0f) }
     var scratchVelocity by remember { mutableFloatStateOf(0f) }
+    var scratchRotation by remember { mutableFloatStateOf(0f) }
+    val scratchSettleJob = remember { AtomicReference<Job?>(null) }
 
     // Автоматическое вращение (только если не скретчим)
-    LaunchedEffect(isPlaying, isScratching, rotationSpeed) {
-        if (isPlaying && !isScratching) {
+    LaunchedEffect(isPlaying, isScratching, isSettling, rotationSpeed) {
+        if (isPlaying && !isScratching && !isSettling) {
             while (true) {
                 rotation.animateTo(
                     rotation.value + 360f,
@@ -1737,7 +1887,10 @@ private fun DiscArt(
         Modifier.pointerInput(Unit) {
             detectDragGestures(
                 onDragStart = { offset ->
+                    scratchSettleJob.getAndSet(null)?.cancel()
+                    isSettling = false
                     isScratching = true
+                    scratchRotation = rotation.value
                     lastAngle = calculateAngle(offset, Offset(size.width / 2f, size.height / 2f))
                     scratchVelocity = 0f
                 },
@@ -1757,25 +1910,27 @@ private fun DiscArt(
                     val deltaSeconds = deltaAngle / 36f
                     onScratch?.invoke(deltaSeconds)
 
-                    // Визуальное вращение
-                    scope.launch {
-                        rotation.snapTo(rotation.value + deltaAngle)
-                    }
+                    scratchRotation += deltaAngle
                 },
                 onDragEnd = {
-                    isScratching = false
-                    // Плавное замедление (отскок)
-                    if (kotlin.math.abs(scratchVelocity) > 5f) {
-                        scope.launch {
+                    val finalRotation = scratchRotation
+                    val finalVelocity = scratchVelocity
+                    isSettling = true
+                    scratchSettleJob.set(scope.launch {
+                        rotation.snapTo(finalRotation)
+                        isScratching = false
+                        if (kotlin.math.abs(finalVelocity) > 5f) {
                             rotation.animateTo(
-                                rotation.value + scratchVelocity * 3f,
+                                finalRotation + finalVelocity * 3f,
                                 animationSpec = spring(
                                     dampingRatio = Spring.DampingRatioMediumBouncy,
                                     stiffness = Spring.StiffnessLow
                                 )
                             )
                         }
-                    }
+                        isSettling = false
+                        scratchSettleJob.set(null)
+                    })
                 }
             )
         }
@@ -1787,7 +1942,7 @@ private fun DiscArt(
         modifier = Modifier
             .fillMaxWidth((0.62f * elementScale).coerceIn(0.3f, 0.9f))
             .aspectRatio(1f)
-            .graphicsLayer { rotationZ = rotation.value }
+            .graphicsLayer { rotationZ = if (isScratching) scratchRotation else rotation.value }
             .then(scratchModifier),
         contentAlignment = Alignment.Center
     ) {
@@ -1967,8 +2122,33 @@ fun ClickWheel(
                     var lastAngle = 0f
                     var accumulatedRotation = 0f
                     var lastReportedStep = 0
-                    var lastScrollTime = 0L
                     var returnAnimationJob: Job? = null
+                    val pendingWheelSteps = ArrayDeque<Int>()
+                    var pendingStepJob: Job? = null
+
+                    fun enqueueWheelSteps(stepDelta: Int) {
+                        val direction = if (stepDelta > 0) 1 else -1
+                        repeat(kotlin.math.abs(stepDelta)) {
+                            pendingWheelSteps.addLast(direction)
+                        }
+                        if (pendingStepJob?.isActive == true) return
+
+                        pendingStepJob = coroutineScope.launch {
+                            while (pendingWheelSteps.isNotEmpty()) {
+                                currentOnScroll(pendingWheelSteps.removeFirst())
+                                if (currentClickSoundEnabled) {
+                                    if (currentCustomSoundId != 0) {
+                                        currentSoundPool?.play(currentCustomSoundId, 1f, 1f, 1, 0, 1f)
+                                    } else {
+                                        clickToneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP2, 24)
+                                    }
+                                }
+                                currentVibrate()
+                                if (pendingWheelSteps.isNotEmpty()) delay(50)
+                            }
+                            pendingStepJob = null
+                        }
+                    }
 
                     detectDragGestures(
                         onDragStart = { offset ->
@@ -1978,9 +2158,6 @@ fun ClickWheel(
                             lastReportedStep = 0
                         },
                         onDrag = { change, _ ->
-                            val now = System.currentTimeMillis()
-                            if (now - lastScrollTime < 50) return@detectDragGestures
-
                             val currentAngle = calculateAngle(change.position, center)
 
                             var deltaAngle = currentAngle - lastAngle
@@ -1995,17 +2172,8 @@ fun ClickWheel(
 
                             if (currentStep != lastReportedStep) {
                                 val diff = currentStep - lastReportedStep
-                                currentOnScroll(diff)
-                                if (currentClickSoundEnabled) {
-                                    if (currentCustomSoundId != 0) {
-                                        currentSoundPool?.play(currentCustomSoundId, 1f, 1f, 1, 0, 1f)
-                                    } else {
-                                        clickToneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP2, 24)
-                                    }
-                                }
-                                currentVibrate()
+                                enqueueWheelSteps(diff)
                                 lastReportedStep = currentStep
-                                lastScrollTime = now
                             }
 
                             wheelRotation = accumulatedRotation * 1.5f
@@ -2041,60 +2209,99 @@ fun ClickWheel(
             }
         }
 
-        Icon(
-            imageVector = Icons.Default.Menu,
-            contentDescription = localized("Меню", "Menu"),
-            tint = palette.wheelIcon,
+        Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(top = 22.dp * wheelScale)
-                .size(34.dp * wheelScale)
-                .graphicsLayer { rotationZ = iconRotation }
-                .clickable { onMenuClick() }
-        )
+                .size(48.dp * wheelScale)
+                .clickable {
+                    currentVibrate()
+                    onMenuClick()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Menu,
+                contentDescription = localized("Меню", "Menu"),
+                tint = palette.wheelIcon,
+                modifier = Modifier
+                    .size(38.dp * wheelScale)
+                    .graphicsLayer { rotationZ = iconRotation }
+            )
+        }
 
-        Icon(
-            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-            contentDescription = if (isPlaying) localized("Пауза", "Pause") else localized("Воспроизвести", "Play"),
-            tint = palette.wheelIcon,
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 22.dp * wheelScale)
-                .size(34.dp * wheelScale)
-                .graphicsLayer { rotationZ = iconRotation }
-                .clickable { onPlayPause() }
-        )
+                .size(48.dp * wheelScale)
+                .clickable {
+                    currentVibrate()
+                    onPlayPause()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) localized("Пауза", "Pause") else localized("Воспроизвести", "Play"),
+                tint = palette.wheelIcon,
+                modifier = Modifier
+                    .size(38.dp * wheelScale)
+                    .graphicsLayer { rotationZ = iconRotation }
+            )
+        }
 
-        Icon(
-            imageVector = Icons.Default.SkipPrevious,
-            contentDescription = localized("Предыдущий трек", "Previous track"),
-            tint = palette.wheelIcon,
+        Box(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .padding(start = 22.dp * wheelScale)
-                .size(34.dp * wheelScale)
+                .size(48.dp * wheelScale)
+                .clickable {
+                    currentVibrate()
+                    onPreviousTrack()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.SkipPrevious,
+                contentDescription = localized("Предыдущий трек", "Previous track"),
+                tint = palette.wheelIcon,
+                modifier = Modifier
+                    .size(38.dp * wheelScale)
                     .graphicsLayer { rotationZ = iconRotation }
-                .clickable { onPreviousTrack() }
-        )
+            )
+        }
 
-        Icon(
-            imageVector = Icons.Default.SkipNext,
-            contentDescription = localized("Следующий трек", "Next track"),
-            tint = palette.wheelIcon,
+        Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 22.dp * wheelScale)
-                .size(34.dp * wheelScale)
+                .size(48.dp * wheelScale)
+                .clickable {
+                    currentVibrate()
+                    onNextTrack()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.SkipNext,
+                contentDescription = localized("Следующий трек", "Next track"),
+                tint = palette.wheelIcon,
+                modifier = Modifier
+                    .size(38.dp * wheelScale)
                     .graphicsLayer { rotationZ = iconRotation }
-                .clickable { onNextTrack() }
-        )
+            )
+        }
 
         // Центральная кнопка подтверждения — статична
         Box(
             modifier = Modifier
                 .size(88.dp * wheelScale)
                 .background(palette.centerButton, CircleShape)
-                .clickable { onConfirm() },
+                .clickable {
+                    currentVibrate()
+                    onConfirm()
+                },
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -2112,12 +2319,27 @@ fun ClickWheel(
 // =============== Строка трека ===============
 
 @Composable
-fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
+fun TrackRow(
+    track: AudioTrack,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    animationDurationMs: Int = 200
+) {
     val palette = LocalPlayerPalette.current
+    val transitionDuration = animationDurationMs.coerceIn(0, 420)
     val rowBackground by animateColorAsState(
         targetValue = if (isSelected) palette.listRowSelected else Color.Transparent,
-        animationSpec = tween(180),
+        animationSpec = if (transitionDuration == 0) snap() else tween(transitionDuration),
         label = "track-row-selection"
+    )
+    val selectionProgress by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = if (transitionDuration == 0) {
+            snap()
+        } else {
+            tween(transitionDuration, easing = FastOutSlowInEasing)
+        },
+        label = "track-row-indicator"
     )
     Row(
         modifier = Modifier
@@ -2128,15 +2350,24 @@ fun TrackRow(track: AudioTrack, isSelected: Boolean, onClick: () -> Unit) {
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (isSelected) {
+        Box(
+            modifier = Modifier.width(20.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
             Icon(
                 Icons.Default.PlayArrow,
                 null,
                 tint = palette.text,
-                modifier = Modifier.size(14.dp)
+                modifier = Modifier
+                    .size(14.dp)
+                    .graphicsLayer {
+                        alpha = selectionProgress
+                        scaleX = 0.75f + selectionProgress * 0.25f
+                        scaleY = 0.75f + selectionProgress * 0.25f
+                    }
             )
-            Spacer(modifier = Modifier.width(6.dp))
         }
+        Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = "${track.title} - ${track.artist}",
             fontSize = 13.sp,
@@ -2163,6 +2394,7 @@ private fun DirectorySelectionPanel(
     selectedIndex: Int,
     isLoading: Boolean,
     landscape: Boolean,
+    animationDurationMs: Int,
     elementScale: Float = 1f,
     onSelectionChange: (Int) -> Unit
 ) {
@@ -2170,12 +2402,21 @@ private fun DirectorySelectionPanel(
     val listState = rememberLazyListState()
     val itemCount = folders.size + 2
 
-    LaunchedEffect(selectedIndex, folders, isLoading) {
+    LaunchedEffect(selectedIndex, folders, isLoading, animationDurationMs) {
         if (!isLoading) {
             val viewportHeight = listState.layoutInfo.viewportEndOffset -
                 listState.layoutInfo.viewportStartOffset
             val offset = -(viewportHeight / 2 - 20).coerceAtLeast(0)
-            listState.animateScrollToItem(selectedIndex.coerceIn(0, itemCount - 1), offset)
+            val targetIndex = selectedIndex.coerceIn(0, itemCount - 1)
+            if (animationDurationMs == 0) {
+                val isSelectedItemVisible = listState.layoutInfo.visibleItemsInfo
+                    .any { it.index == targetIndex }
+                if (!isSelectedItemVisible) {
+                    listState.scrollToItem(targetIndex, offset)
+                }
+                return@LaunchedEffect
+            }
+            listState.animateScrollToItem(targetIndex, offset)
         }
     }
 
@@ -2221,6 +2462,7 @@ private fun DirectorySelectionPanel(
                         detail = currentFolderTrackCount.toString(),
                         isSelected = selectedIndex == 0,
                         showFolderIcon = !isRoot,
+                        animationDurationMs = animationDurationMs,
                         onClick = { onSelectionChange(0) }
                     )
                 }
@@ -2230,6 +2472,7 @@ private fun DirectorySelectionPanel(
                         detail = folder.trackCount.toString(),
                         isSelected = selectedIndex == index + 1,
                         showFolderIcon = true,
+                        animationDurationMs = animationDurationMs,
                         onClick = { onSelectionChange(index + 1) }
                     )
                 }
@@ -2239,6 +2482,7 @@ private fun DirectorySelectionPanel(
                         detail = "",
                         isSelected = selectedIndex == itemCount - 1,
                         showFolderIcon = true,
+                        animationDurationMs = animationDurationMs,
                         onClick = { onSelectionChange(itemCount - 1) }
                     )
                 }
@@ -2253,13 +2497,24 @@ private fun DirectoryRow(
     detail: String,
     isSelected: Boolean,
     showFolderIcon: Boolean,
+    animationDurationMs: Int,
     onClick: () -> Unit
 ) {
     val palette = LocalPlayerPalette.current
+    val transitionDuration = animationDurationMs.coerceIn(0, 420)
     val rowBackground by animateColorAsState(
         targetValue = if (isSelected) palette.listRowSelected else Color.Transparent,
-        animationSpec = tween(180),
+        animationSpec = if (transitionDuration == 0) snap() else tween(transitionDuration),
         label = "folder-row-selection"
+    )
+    val selectionProgress by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = if (transitionDuration == 0) {
+            snap()
+        } else {
+            tween(transitionDuration, easing = FastOutSlowInEasing)
+        },
+        label = "folder-row-indicator"
     )
     Row(
         modifier = Modifier
@@ -2270,15 +2525,24 @@ private fun DirectoryRow(
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (isSelected) {
+        Box(
+            modifier = Modifier.width(20.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
             Icon(
                 Icons.Default.PlayArrow,
                 contentDescription = null,
                 tint = palette.text,
-                modifier = Modifier.size(14.dp)
+                modifier = Modifier
+                    .size(14.dp)
+                    .graphicsLayer {
+                        alpha = selectionProgress
+                        scaleX = 0.75f + selectionProgress * 0.25f
+                        scaleY = 0.75f + selectionProgress * 0.25f
+                    }
             )
-            Spacer(modifier = Modifier.width(6.dp))
         }
+        Spacer(modifier = Modifier.width(6.dp))
         if (showFolderIcon) {
             Icon(
                 imageVector = Icons.Default.Folder,
@@ -2855,7 +3119,7 @@ fun SettingsScreen(
 
             PlayerSettingSwitch(
                 title = localized("Вибрация Click Wheel", "Click Wheel vibration"),
-                description = localized("Короткий тактильный отклик при прокрутке колеса", "Short haptic feedback while scrolling the wheel"),
+                description = localized("Отклик при прокрутке и нажатии кнопок колеса", "Haptic feedback while scrolling and pressing wheel buttons"),
                 checked = wheelVibrationEnabled,
                 onCheckedChange = onToggleWheelVibration
             )
@@ -3086,6 +3350,7 @@ private fun ThemeSettingsScreen(
     var editingDarkTheme by rememberSaveable { mutableStateOf(true) }
     var showSaveDialog by remember { mutableStateOf(false) }
     var presetName by remember { mutableStateOf("") }
+    var expandedColorField by remember { mutableStateOf<String?>(null) }
     val editingPalette = if (editingDarkTheme) themeColors.dark else themeColors.light
 
     Box(
@@ -3179,6 +3444,10 @@ private fun ThemeSettingsScreen(
                 ThemeColorField(
                     color = field.get(editingPalette),
                     title = if (language == "en") field.titleEn else field.titleRu,
+                    expanded = expandedColorField == field.key,
+                    onExpandedChange = { expanded ->
+                        expandedColorField = if (expanded) field.key else null
+                    },
                     onColorChange = { onColorChange(editingDarkTheme, field, it) }
                 )
             }
@@ -3289,55 +3558,204 @@ private fun ThemePresetCard(
 private fun ThemeColorField(
     color: Color,
     title: String,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
     onColorChange: (Color) -> Unit
 ) {
     val palette = LocalPlayerPalette.current
-    var value by remember(color) {
-        mutableStateOf("#%08X".format(color.toArgb()))
+    val initialHsv = remember(color) {
+        FloatArray(3).also { android.graphics.Color.colorToHSV(color.toArgb(), it) }
     }
+    var hue by remember(color) { mutableFloatStateOf(initialHsv[0]) }
+    var saturation by remember(color) { mutableFloatStateOf(initialHsv[1]) }
+    var brightness by remember(color) { mutableFloatStateOf(initialHsv[2]) }
+    var pickerColor by remember(color) { mutableStateOf(color) }
+    val hueColor = remember(hue) {
+        Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 1f, 1f)))
+    }
+    val saturationHueBrush = remember(hueColor) {
+        Brush.horizontalGradient(listOf(Color.White, hueColor))
+    }
+    val brightnessBrush = remember {
+        Brush.verticalGradient(listOf(Color.Transparent, Color.Black))
+    }
+    val hueBrush = remember {
+        Brush.horizontalGradient(
+            listOf(Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red)
+        )
+    }
+    fun colorAtCurrentSelection(): Color = Color(
+        android.graphics.Color.HSVToColor(
+            (color.alpha * 255).toInt(),
+            floatArrayOf(hue, saturation, brightness)
+        )
+    )
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 8.dp),
+            .padding(top = 8.dp)
+            .animateContentSize(tween(180)),
         colors = CardDefaults.cardColors(containerColor = palette.surface),
         shape = RoundedCornerShape(8.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .background(color, RoundedCornerShape(6.dp))
-                    .border(1.dp, palette.divider, RoundedCornerShape(6.dp))
-            )
-            Spacer(Modifier.width(10.dp))
-            OutlinedTextField(
-                value = value,
-                onValueChange = { input ->
-                    value = input
-                    parseThemeColor(input)?.let(onColorChange)
-                },
-                label = { Text(title) },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
+        Column(Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(pickerColor, RoundedCornerShape(6.dp))
+                        .border(1.dp, palette.divider, RoundedCornerShape(6.dp))
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, color = palette.text, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "#%08X".format(pickerColor.toArgb()),
+                        color = palette.textSecondary,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                TextButton(onClick = { onExpandedChange(!expanded) }) {
+                    Text(
+                        if (expanded) localized("Готово", "Done")
+                        else localized("Выбрать цвет", "Choose color")
+                    )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(160)),
+                exit = fadeOut(tween(120)),
+                label = "color-picker"
+            ) {
+                Column(modifier = Modifier.padding(top = 10.dp)) {
+                    Text(
+                        localized("Насыщенность и яркость", "Saturation and brightness"),
+                        color = palette.textSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(150.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(1.dp, palette.divider, RoundedCornerShape(10.dp))
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    down.consume()
+
+                                    fun updateSelection(position: Offset) {
+                                        saturation = (position.x / size.width).coerceIn(0f, 1f)
+                                        brightness = (1f - position.y / size.height).coerceIn(0f, 1f)
+                                        pickerColor = colorAtCurrentSelection()
+                                    }
+
+                                    updateSelection(down.position)
+                                    var pointerPressed = true
+                                    while (pointerPressed) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                            ?: break
+                                        updateSelection(change.position)
+                                        change.consume()
+                                        pointerPressed = change.pressed
+                                    }
+                                    onColorChange(pickerColor)
+                                }
+                            }
+                    ) {
+                        drawRect(
+                            brush = saturationHueBrush,
+                            size = size
+                        )
+                        drawRect(
+                            brush = brightnessBrush,
+                            size = size
+                        )
+                        val cursor = Offset(
+                            saturation * size.width,
+                            (1f - brightness) * size.height
+                        )
+                        drawCircle(
+                            color = Color.Black,
+                            radius = 10.dp.toPx(),
+                            center = cursor,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4.dp.toPx())
+                        )
+                        drawCircle(
+                            color = Color.White,
+                            radius = 10.dp.toPx(),
+                            center = cursor,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+                        )
+                    }
+
+                    Text(
+                        localized("Оттенок", "Hue"),
+                        color = palette.textSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)
+                    )
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(28.dp)
+                            .clip(CircleShape)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    down.consume()
+
+                                    fun updateHue(position: Offset) {
+                                        hue = (position.x / size.width * 360f).coerceIn(0f, 360f)
+                                        pickerColor = colorAtCurrentSelection()
+                                    }
+
+                                    updateHue(down.position)
+                                    var pointerPressed = true
+                                    while (pointerPressed) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                            ?: break
+                                        updateHue(change.position)
+                                        change.consume()
+                                        pointerPressed = change.pressed
+                                    }
+                                    onColorChange(pickerColor)
+                                }
+                            }
+                    ) {
+                        drawRoundRect(
+                            brush = hueBrush,
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f),
+                            size = size
+                        )
+                        val cursorX = hue / 360f * size.width
+                        drawCircle(
+                            color = Color.Black,
+                            radius = size.height * 0.42f,
+                            center = Offset(cursorX, center.y),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3.dp.toPx())
+                        )
+                        drawCircle(
+                            color = Color.White,
+                            radius = size.height * 0.42f,
+                            center = Offset(cursorX, center.y),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx())
+                        )
+                    }
+                }
+            }
         }
     }
 }
-
-private fun parseThemeColor(value: String): Color? = runCatching {
-    val hex = value.trim().removePrefix("#")
-    val normalized = when (hex.length) {
-        6 -> "FF$hex"
-        8 -> hex
-        else -> return null
-    }
-    Color(android.graphics.Color.parseColor("#$normalized"))
-}.getOrNull()
 
 @Composable
 private fun ScaleSettingsScreen(
@@ -3471,14 +3889,17 @@ fun VinylScreensaver(
 
     // Состояние для скретча
     var isScratching by remember { mutableStateOf(false) }
+    var isSettling by remember { mutableStateOf(false) }
     var lastAngle by remember { mutableFloatStateOf(0f) }
     var scratchVelocity by remember { mutableFloatStateOf(0f) }
+    var scratchRotation by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
+    val scratchSettleJob = remember { AtomicReference<Job?>(null) }
 
     // Автоматическое вращение (только если не скретчим)
-    LaunchedEffect(isPlaying, isScratching, rotationSpeed) {
+    LaunchedEffect(isPlaying, isScratching, isSettling, rotationSpeed) {
         while (true) {
-            if (isPlaying && !isScratching) {
+            if (isPlaying && !isScratching && !isSettling) {
                 rotation.animateTo(
                     rotation.value + 360f,
                     animationSpec = tween(
@@ -3497,7 +3918,10 @@ fun VinylScreensaver(
         Modifier.pointerInput(Unit) {
             detectDragGestures(
                 onDragStart = { offset ->
+                    scratchSettleJob.getAndSet(null)?.cancel()
+                    isSettling = false
                     isScratching = true
+                    scratchRotation = rotation.value
                     lastAngle = calculateAngle(offset, Offset(size.width / 2f, size.height / 2f))
                     scratchVelocity = 0f
                 },
@@ -3517,25 +3941,27 @@ fun VinylScreensaver(
                     val deltaSeconds = deltaAngle / 36f
                     onScratch?.invoke(deltaSeconds)
 
-                    // Визуальное вращение
-                    scope.launch {
-                        rotation.snapTo(rotation.value + deltaAngle)
-                    }
+                    scratchRotation += deltaAngle
                 },
                 onDragEnd = {
-                    isScratching = false
-                    // Плавное замедление (отскок)
-                    if (kotlin.math.abs(scratchVelocity) > 5f) {
-                        scope.launch {
+                    val finalRotation = scratchRotation
+                    val finalVelocity = scratchVelocity
+                    isSettling = true
+                    scratchSettleJob.set(scope.launch {
+                        rotation.snapTo(finalRotation)
+                        isScratching = false
+                        if (kotlin.math.abs(finalVelocity) > 5f) {
                             rotation.animateTo(
-                                rotation.value + scratchVelocity * 3f,
+                                finalRotation + finalVelocity * 3f,
                                 animationSpec = spring(
                                     dampingRatio = Spring.DampingRatioMediumBouncy,
                                     stiffness = Spring.StiffnessLow
                                 )
                             )
                         }
-                    }
+                        isSettling = false
+                        scratchSettleJob.set(null)
+                    })
                 }
             )
         }
@@ -3556,7 +3982,7 @@ fun VinylScreensaver(
             Box(
                 modifier = Modifier
                     .size(320.dp)
-                    .graphicsLayer { rotationZ = rotation.value }
+                    .graphicsLayer { rotationZ = if (isScratching) scratchRotation else rotation.value }
                     .then(scratchModifier),
                 contentAlignment = Alignment.Center
             ) {

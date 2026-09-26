@@ -1,0 +1,5 @@
+• Smoother Click Wheel scrolling; each wheel detent is handled separately.
+• Enlarged wheel controls and haptic feedback on button presses.
+• Added an HSV color picker with local drag preview.
+• Fixed Play/Pause state after leaving the track list.
+• Reduced repeat work for album art and vinyl scratching.

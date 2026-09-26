@@ -20,7 +20,7 @@ Use this skill for Android application features that involve platform APIs, app 
 ## CirclePlayer-specific facts
 
 - Single module `:app`; Kotlin package/application ID `com.example.circleplayer`.
-- `minSdk 25`, `targetSdk 35`, Compose UI, Media3 `1.4.1`.
+- `minSdk 25`, `targetSdk 36`, Compose UI, Media3 `1.4.1`.
 - `MainActivity` owns permission prompts, folder-picker callback, preferences and connects to the service through a MediaController.
 - `PlaybackService` owns the authoritative ExoPlayer and MediaSession used by Compose UI and Android media controls.
 - `MusicRepository` queries MediaStore and currently depends on the `DATA` filesystem path when filtering a chosen folder. Do not assume SAF grants a usable raw path on all providers/devices.

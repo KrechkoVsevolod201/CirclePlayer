@@ -1,0 +1,12 @@
+CirclePlayer is a music player for audio files stored on your Android device. Browse and control your music with a Click Wheel and customize the player to your taste.
+
+FEATURES
+• Play local music and browse folders with the Click Wheel.
+• Large controls, optional haptic feedback and a configurable wheel sound.
+• Spinning vinyl with album artwork and an animated screensaver.
+• Analog-style effects: Wow & Flutter, Chorus, gentle saturation and vinyl noise.
+• Light and dark themes, an HSV color picker and custom presets.
+• Portrait and landscape layouts with independent element scaling.
+• Playback controls in Android notifications and connected media devices.
+
+CirclePlayer works with local audio files. No account is required. The app has no ads or analytics and does not send your music library to the developer. Audio, notification and vibration permissions are requested only for their related features.

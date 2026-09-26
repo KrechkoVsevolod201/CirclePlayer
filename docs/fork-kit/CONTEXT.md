@@ -7,7 +7,7 @@ CirclePlayer is a local-music Android player styled after the iPod Classic. The 
 - Single Gradle module: `:app`.
 - Android Gradle Plugin 8.13.0, Kotlin 2.0.21, Gradle 8.13.
 - Compose BOM 2024.09.00, Material 3, Media3 1.4.1.
-- `minSdk 25`, `targetSdk 35`, Java/Kotlin target 11.
+- `minSdk 25`, `targetSdk 36`, Java/Kotlin target 11.
 - Package and application ID: `com.example.circleplayer`.
 
 ## Main source files
@@ -40,4 +40,4 @@ CirclePlayer is a local-music Android player styled after the iPod Classic. The 
 ./gradlew connectedAndroidTest
 ```
 
-The current release build is configured with the debug signing config. Fork maintainers should configure their own release signing before publishing under their identity.
+Release signing is read from an ignored `keystore.properties` file or `RELEASE_*` environment variables. Builds without signing credentials are unsigned. Never publish a debug-signed build; see `docs/STORE_RELEASE.md` for store preparation.
