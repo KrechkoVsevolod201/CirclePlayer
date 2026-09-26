@@ -1,0 +1,37 @@
+Categories:
+  - Multimedia
+License: MIT
+AuthorName: KrechkoVsevolod201
+AuthorWebSite: https://github.com/KrechkoVsevolod201
+AutoName: CirclePlayer
+WebSite: https://github.com/KrechkoVsevolod201/CirclePlayer
+SourceCode: https://github.com/KrechkoVsevolod201/CirclePlayer
+IssueTracker: https://github.com/KrechkoVsevolod201/CirclePlayer/issues
+Changelog: https://github.com/KrechkoVsevolod201/CirclePlayer/blob/master/docs/releases/v1.6.md
+Summary: Offline music player with a Click Wheel and spinning vinyl
+Description: |-
+  Play audio files stored on your Android device with a classic wheel-based
+  interface.
+  .
+  Features:
+  * Browse local music and folders with a Click Wheel.
+  * Optional haptic feedback and configurable wheel sound.
+  * Spinning vinyl with album artwork and a screensaver.
+  * Realtime analog-style audio effects.
+  * Light/dark themes and a HSV color picker.
+  * Android media session and notification controls.
+  .
+  No account, ads, analytics, or developer-side network service is included.
+RepoType: git
+Repo: https://github.com/KrechkoVsevolod201/CirclePlayer.git
+Builds:
+  - versionName: '1.6'
+    versionCode: 7
+    commit: 076030550f8f410586587238efb1d0fc02f7ff24
+    subdir: app
+    gradle:
+      - yes
+CurrentVersion: '1.6'
+CurrentVersionCode: 7
+UpdateCheckMode: Tags
+AutoUpdateMode: Version v%v

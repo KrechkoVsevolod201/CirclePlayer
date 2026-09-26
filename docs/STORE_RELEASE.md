@@ -28,8 +28,10 @@ and the store signing certificates securely.
 - Upload the signed AAB from `app/build/outputs/bundle/release/`.
 - Complete the Play Console app record, content rating, target-audience,
   advertising, and Data safety forms. The app has no ads, analytics, account,
-  network permission, or developer-side data collection; it does request local
-  audio access, notifications, foreground playback, and vibration.
+  `INTERNET` permission, or developer-side data collection; it does request
+  local audio access, notifications, foreground playback, and vibration. The
+  merged manifest includes `ACCESS_NETWORK_STATE` from a dependency but no
+  Internet access or upload endpoint.
 - Add the privacy policy URL after the repository is pushed:
   `https://github.com/KrechkoVsevolod201/CirclePlayer/blob/master/PRIVACY_POLICY.md`.
 - Prepare a 512x512 opaque store icon and a 1024x500 feature graphic. The
